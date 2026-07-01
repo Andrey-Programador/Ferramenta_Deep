@@ -1,3 +1,4 @@
+
 import io
 import os
 import tempfile
@@ -5,57 +6,30 @@ import unicodedata
 from datetime import datetime
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
-# =========================
-# CONFIGURAÇÃO DA PÁGINA
-# =========================
+# =========================================================
+# CONFIGURAÇÃO GERAL
+# =========================================================
 st.set_page_config(page_title="Sistema de Automações", layout="wide")
 
-st.markdown(
-    """
-    <style>
-        .stApp {
-            background-color: 	#000000
-            ;
-        }
-        h1, h2, h3 {
-            color: #064e3b;
-        }
-        div[data-baseweb="tab-list"] button {
-            font-size: 15px !important;
-            font-weight: 700 !important;
-        }
-        .block-container {
-            padding-top: 1.5rem;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown("""
+<style>
+    .stApp { background-color: #000000; }
+    h1, h2, h3 { color: #064e3b; }
+    div[data-baseweb="tab-list"] button { font-size: 15px !important; font-weight: 700 !important; }
+    .block-container { padding-top: 1.2rem; }
+</style>
+""", unsafe_allow_html=True)
 
-st.title("Sistema Completo de Automações")
-st.caption("Interface web em Streamlit mantendo a lógica original dos seus scripts Python.")
+st.title("Sistema Complepleto de Automações")
+st.caption("Filtros, relatórios, exportações e acompanhamento diário de produtividade.")
 
 
-# =========================
+# =========================================================
 # FUNÇÕES AUXILIARES
-# =========================
-def excel_bytes_from_wb(workbook):
-    buffer = io.BytesIO()
-    workbook.save(buffer)
-    buffer.seek(0)
-    return buffer.getvalue()
-
-
-def excel_bytes_from_df(df):
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-    buffer.seek(0)
-    return buffer.getvalue()
-
-
+# =========================================================
 def normalize_text(texto):
     texto = str(texto).strip().upper()
     texto = unicodedata.normalize("NFKD", texto)
@@ -64,12 +38,19 @@ def normalize_text(texto):
     return texto
 
 
+def encontrar_coluna(df, palavras):
+    for col in df.columns:
+        col_norm = normalize_text(col)
+        if all(normalize_text(p) in col_norm for p in palavras):
+            return col
+    return None
+
+
 def safe_sheet_name(nome):
     nome = str(nome)
     for c in ['\\', '/', '*', '[', ']', ':', '?']:
         nome = nome.replace(c, "")
-    nome = nome[:30]
-    return nome if nome else "ABA"
+    return nome[:30] if nome else "ABA"
 
 
 def read_excel_any(uploaded_file, dtype=None):
@@ -80,24 +61,120 @@ def read_excel_any(uploaded_file, dtype=None):
     return pd.read_excel(uploaded_file, dtype=dtype, engine="openpyxl")
 
 
-# =========================
+def excel_bytes_from_wb(wb):
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def excel_bytes_from_df(df, sheet_name="RELATORIO"):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    output.seek(0)
+    return output.getvalue()
+
+
+def excel_value(valor):
+    if isinstance(valor, tuple):
+        if len(valor) == 1:
+            return valor[0]
+        return " - ".join(str(v) for v in valor)
+    if pd.isna(valor):
+        return ""
+    return valor
+
+
+def aplicar_bordas_e_larguras(ws, max_width=55):
+    from openpyxl.styles import Border, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.cell.cell import MergedCell
+
+    borda = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
+
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
+            if cell.value is not None:
+                cell.border = borda
+
+    for col_idx, col_cells in enumerate(ws.columns, start=1):
+        max_len = 0
+        for cell in col_cells:
+            if isinstance(cell, MergedCell):
+                continue
+            if cell.value is not None:
+                max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 4, max_width)
+
+
+# =========================================================
+# CLASSIFICAÇÕES
+# =========================================================
+def classificar_periodo(hora):
+    try:
+        hora = int(hora)
+    except Exception:
+        return "FORA DO PERÍODO"
+
+    if hora in [10, 11, 12]:
+        return "MANHÃ"
+    if hora in [15, 17, 18]:
+        return "TARDE"
+    return "FORA DO PERÍODO"
+
+
+def classificar_faixa_horario_excel(hora):
+    try:
+        hora = int(hora)
+    except Exception:
+        return "FORA DO PERÍODO"
+    if hora == 10:
+        return "MANHÃ 1"
+    if hora in [11, 12]:
+        return "MANHÃ 2"
+    if hora == 15:
+        return "TARDE 1"
+    if hora in [17, 18]:
+        return "TARDE 2"
+    return "FORA DO PERÍODO"
+
+
+def classificar_tipo_atendimento(valor):
+    v = normalize_text(valor)
+    if "ADESAO" in v:
+        return "ADESÕES"
+    if "MORADOR AUSENTE" in v or "AUSENTE" in v:
+        return "AUSENTES"
+    if "RECUSA" in v:
+        return "RECUSAS"
+    if "AGENDAMENTO" in v or "AGEND" in v:
+        return "AGENDAMENTOS"
+    if "VAGO" in v:
+        return "IMOVEIS VAGOS"
+    if "DEMOLIDO" in v:
+        return "DEMOLIDO"
+    if "ABANDONADO" in v:
+        return "ABANDONADO"
+    return "OUTROS"
+
+
+# =========================================================
 # 1) FILTRO DE ADESÕES
-# =========================
+# =========================================================
 def processar_filtro_adesoes(uploaded_file):
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Border, Side, Font, Alignment
 
     df = read_excel_any(uploaded_file)
-    df.columns = df.columns.str.strip()
+    df.columns = df.columns.astype(str).str.strip()
 
     if "Tipo de atendimento" in df.columns:
-        df = df[
-            df["Tipo de atendimento"].astype(str).str.strip().str.upper()
-            == "ADESÃO REALIZADA (MORADOR PRESENTE)"
-        ]
+        df = df[df["Tipo de atendimento"].astype(str).str.strip().str.upper() == "ADESÃO REALIZADA (MORADOR PRESENTE)"]
 
     df_final = pd.DataFrame()
-
     for coluna in df.columns:
         nome = str(coluna).strip().lower()
         if "link backoffice" in nome:
@@ -110,47 +187,28 @@ def processar_filtro_adesoes(uploaded_file):
             df_final["ASRO"] = df[coluna]
         elif nome == "nome completo:":
             df_final["Cliente"] = df[coluna]
-        elif nome == "é novo cliente?" or nome == "e novo cliente?":
+        elif nome in ["é novo cliente?", "e novo cliente?"]:
             df_final["É novo cliente?"] = df[coluna]
-        elif nome == "situação backoffice" or nome == "situacao backoffice":
+        elif nome in ["situação backoffice", "situacao backoffice"]:
             df_final["Backoffice"] = df[coluna]
         elif nome == "tipo de atendimento":
             df_final["Tipo de atendimento"] = df[coluna]
 
-    colunas_finais = [
-        "Link Backoffice",
-        "Code Deep",
-        "Data do registro",
-        "ASRO",
-        "É novo cliente?",
-        "Cliente",
-        "Backoffice",
-        "Tipo de atendimento",
-    ]
-
-    for coluna in colunas_finais:
-        if coluna not in df_final.columns:
-            df_final[coluna] = ""
-
+    colunas_finais = ["Link Backoffice", "Code Deep", "Data do registro", "ASRO", "É novo cliente?", "Cliente", "Backoffice", "Tipo de atendimento"]
+    for col in colunas_finais:
+        if col not in df_final.columns:
+            df_final[col] = ""
     df_final = df_final[colunas_finais]
 
     wb = Workbook()
     ws = wb.active
     ws.title = "RELATORIO"
-
     header_fill = PatternFill(start_color="4B0082", fill_type="solid")
     header_font = Font(color="FFFFFF", bold=True)
-
-    borda = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
-    )
+    borda = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
 
     for col_id, col_name in enumerate(df_final.columns, start=1):
-        cell = ws.cell(row=1, column=col_id)
-        cell.value = col_name
+        cell = ws.cell(row=1, column=col_id, value=col_name)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center")
@@ -158,46 +216,35 @@ def processar_filtro_adesoes(uploaded_file):
 
     for i, row in df_final.iterrows():
         for col_id, value in enumerate(row, start=1):
-            cell = ws.cell(row=i + 2, column=col_id)
-            cell.value = value
-            cell.border = borda
+            ws.cell(row=i + 2, column=col_id, value=excel_value(value)).border = borda
 
-    for col in ws.columns:
-        max_len = 0
-        col_letter = col[0].column_letter
-        for cell in col:
-            if cell.value:
-                max_len = max(max_len, len(str(cell.value)))
-        ws.column_dimensions[col_letter].width = max_len + 5
-
-    nome_arquivo = f"Relatorio_Adesoes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    return excel_bytes_from_wb(wb), nome_arquivo
+    aplicar_bordas_e_larguras(ws)
+    return excel_bytes_from_wb(wb), f"Relatorio_Adesoes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
 
-# =========================
+# =========================================================
 # 2) TERMO DE DOAÇÃO
-# =========================
+# =========================================================
 def processar_termo_doacao(uploaded_file, logo_file=None):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.drawing.image import Image
 
     df = read_excel_any(uploaded_file)
-    df.columns = df.columns.str.strip().str.upper()
+    df.columns = df.columns.astype(str).str.strip().str.upper()
 
-    def encontrar_coluna(palavras):
-        colunas = [c for c in df.columns if all(p in c for p in palavras)]
-        return colunas[0] if colunas else None
+    def col_por_palavras(palavras):
+        return next((c for c in df.columns if all(p in c for p in palavras)), None)
 
-    col_code = encontrar_coluna(["CODE"])
-    col_nome = encontrar_coluna(["NOME", "COMPLETO"])
-    col_novo = encontrar_coluna(["NOVO"])
-    col_asro = encontrar_coluna(["ASRO"])
-    col_end = encontrar_coluna(["ENDERE"])
-    col_comp = encontrar_coluna(["COMPLEMENTO"])
+    col_code = col_por_palavras(["CODE"])
+    col_nome = col_por_palavras(["NOME", "COMPLETO"])
+    col_novo = col_por_palavras(["NOVO"])
+    col_asro = col_por_palavras(["ASRO"])
+    col_end = col_por_palavras(["ENDERE"])
+    col_comp = col_por_palavras(["COMPLEMENTO"])
 
     if not col_code or not col_nome or not col_novo:
-        raise ValueError("Colunas obrigatórias não encontradas")
+        raise ValueError("Colunas obrigatórias não encontradas: CODE, NOME COMPLETO e NOVO.")
 
     df[col_novo] = df[col_novo].astype(str).str.upper().str.strip()
     df = df[df[col_novo] == "SIM"]
@@ -207,32 +254,19 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
     df_saida["NOME COMPLETO"] = df[col_nome]
     df_saida["ASRO"] = df[col_asro] if col_asro else ""
     df_saida["ENDEREÇO"] = df[col_end] if col_end else ""
-
-    if col_comp:
-        col_temp = df.loc[:, col_comp]
-        if isinstance(col_temp, pd.DataFrame):
-            df_saida["COMPLEMENTO"] = col_temp.iloc[:, 0]
-        else:
-            df_saida["COMPLEMENTO"] = col_temp
-    else:
-        df_saida["COMPLEMENTO"] = ""
-
-    periodo = datetime.now().strftime("%d-%m-%Y")
+    df_saida["COMPLEMENTO"] = df[col_comp] if col_comp else ""
     df_saida = df_saida.sort_values(by="NOME COMPLETO")
 
     wb = Workbook()
     wb.remove(wb.active)
+    periodo = datetime.now().strftime("%d-%m-%Y")
 
-    ranking = df_saida.groupby("ASRO").size().reset_index(name="TOTAL")
-    ranking = ranking.sort_values(by="TOTAL", ascending=False)
-
+    ranking = df_saida.groupby("ASRO").size().reset_index(name="TOTAL").sort_values("TOTAL", ascending=False)
     ws_rank = wb.create_sheet("RANKING")
     ws_rank.append(["ASRO", "TOTAL"])
     for _, r in ranking.iterrows():
         ws_rank.append([r["ASRO"], r["TOTAL"]])
-
-    grupos = df_saida.groupby("ASRO") if "ASRO" in df_saida.columns else [("GERAL", df_saida)]
-    grupos = sorted(grupos, key=lambda x: str(x[0]))
+    aplicar_bordas_e_larguras(ws_rank)
 
     temp_logo_path = None
     if logo_file is not None:
@@ -241,21 +275,11 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
             tmp.write(logo_file.read())
             temp_logo_path = tmp.name
 
-    def limpar_nome_aba(nome):
-        for c in ['\\', '/', '*', '[', ']', ':', '?']:
-            nome = nome.replace(c, "")
-        return nome[:30]
+    borda = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
 
-    for nome_aba, dados in grupos:
-        nome_final = limpar_nome_aba(f"{nome_aba} - {periodo}")
-        ws = wb.create_sheet(title=nome_final)
-
-        logo_path = None
-        if temp_logo_path and os.path.exists(temp_logo_path):
-            logo_path = temp_logo_path
-        elif os.path.exists("logo.png"):
-            logo_path = "logo.png"
-
+    for asro, dados in sorted(df_saida.groupby("ASRO"), key=lambda x: str(x[0])):
+        ws = wb.create_sheet(title=safe_sheet_name(f"{asro} - {periodo}"))
+        logo_path = temp_logo_path if temp_logo_path and os.path.exists(temp_logo_path) else ("logo.png" if os.path.exists("logo.png") else None)
         if logo_path:
             try:
                 img = Image(logo_path)
@@ -270,40 +294,22 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
         ws["A1"].font = Font(size=16, bold=True, color="FFFFFF")
         ws["A1"].fill = PatternFill(start_color="0DB39E", fill_type="solid")
         ws["A1"].alignment = Alignment(horizontal="center")
-
         ws.merge_cells("A2:E2")
         ws["A2"] = f"Período: {periodo}"
 
         headers = ["CODE DEEP", "ASRO", "NOME COMPLETO", "ENDEREÇO", "COMPLEMENTO"]
         for col, header in enumerate(headers, start=1):
-            cell = ws.cell(row=4, column=col)
-            cell.value = header
+            cell = ws.cell(row=4, column=col, value=header)
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill(start_color="0DB39E", fill_type="solid")
             cell.alignment = Alignment(horizontal="center")
-
-        borda = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')
-        )
+            cell.border = borda
 
         for i, row in enumerate(dados.itertuples(index=False), start=5):
             valores = [row[0], row[2], row[1], row[3], row[4]]
             for col, val in enumerate(valores, start=1):
-                cell = ws.cell(row=i, column=col)
-                cell.value = val
-                cell.border = borda
-
-        ws.column_dimensions["A"].width = 20
-        ws.column_dimensions["B"].width = 25
-        ws.column_dimensions["C"].width = 50
-        ws.column_dimensions["D"].width = 60
-        ws.column_dimensions["E"].width = 25
-
-    nome_arquivo = f"resultado_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    data = excel_bytes_from_wb(wb)
+                ws.cell(row=i, column=col, value=excel_value(val)).border = borda
+        aplicar_bordas_e_larguras(ws)
 
     if temp_logo_path and os.path.exists(temp_logo_path):
         try:
@@ -311,352 +317,28 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
         except Exception:
             pass
 
-    return data, nome_arquivo
+    return excel_bytes_from_wb(wb), f"resultado_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
 
-# =========================
+# =========================================================
 # 3) RELATÓRIO DE AGENTES
-# =========================
+# =========================================================
 def processar_relatorio_agentes(uploaded_file):
     from openpyxl import Workbook
-    from openpyxl.styles import PatternFill, Border, Side, Font, Alignment
-    from openpyxl.chart import BarChart, Reference
 
     df = read_excel_any(uploaded_file)
-    df.columns = df.columns.str.strip().str.upper()
-
-    def col(p):
-        return next((c for c in df.columns if p in c), None)
-
-    col_agente = col("NOME DO AGENTE")
-    col_asro = col("ASRO")
-    col_tipo = col("TIPO DE ATENDIMENTO")
-    col_data = col("DATA")
-
-    faltando = [nome for nome, valor in {
-        "NOME DO AGENTE": col_agente,
-        "ASRO": col_asro,
-        "TIPO DE ATENDIMENTO": col_tipo,
-        "DATA": col_data,
-    }.items() if valor is None]
-
-    if faltando:
-        raise ValueError(f"Colunas obrigatórias não encontradas: {', '.join(faltando)}")
-
-    df = df[[col_agente, col_asro, col_tipo, col_data]].copy()
-    df[col_data] = pd.to_datetime(df[col_data], errors="coerce").dt.date
-
-    def classificar(valor):
-        v = str(valor).upper()
-        if "ADESÃO" in v or "ADESAO" in v:
-            return "ADESAO"
-        if "DEMOLIDO" in v:
-            return "DEMOLIDO"
-        if "AUSENTE" in v:
-            return "AUSENTE"
-        if "RECUSA" in v:
-            return "RECUSA"
-        return None
-
-    df["TIPO_CLASS"] = df[col_tipo].apply(classificar)
-
-    wb = Workbook()
-    wb.remove(wb.active)
-
-    cinza = PatternFill(start_color="D9D9D9", fill_type="solid")
-    cinza_total = PatternFill(start_color="BFBFBF", fill_type="solid")
-    verde = PatternFill(start_color="006400", fill_type="solid")
-
-    borda = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
-    )
-
-    for asro, dados_asro in df.groupby(col_asro):
-        ws = wb.create_sheet(title=safe_sheet_name(str(asro)))
-
-        ws.merge_cells("A1:G1")
-        ws["A1"] = "RELATÓRIO AGENTES"
-        ws["A1"].font = Font(size=16, bold=True, color="FFFFFF")
-        ws["A1"].fill = verde
-        ws["A1"].alignment = Alignment(horizontal="center")
-
-        ws.merge_cells("A2:G2")
-
-        linha = 3
-        headers = ["DATAS", "AGENTES", "ADESÃO", "DEMOLIDO", "AUSENTE", "RECUSA", "TOTAL GERAL"]
-        for col_id, h in enumerate(headers, start=1):
-            cell = ws.cell(row=linha, column=col_id)
-            cell.value = h
-            cell.border = borda
-
-        linha += 1
-
-        for data_item, dados_data in dados_asro.groupby(col_data):
-            inicio_bloco = linha
-            for agente, dados_agente in dados_data.groupby(col_agente):
-                cont = dados_agente["TIPO_CLASS"].value_counts()
-
-                adesao = cont.get("ADESAO", 0)
-                demolido = cont.get("DEMOLIDO", 0)
-                ausente = cont.get("AUSENTE", 0)
-                recusa = cont.get("RECUSA", 0)
-
-                ws.cell(row=linha, column=2).value = agente
-                ws.cell(row=linha, column=3).value = adesao
-                ws.cell(row=linha, column=4).value = demolido
-                ws.cell(row=linha, column=5).value = ausente
-                ws.cell(row=linha, column=6).value = recusa
-                ws.cell(row=linha, column=7).value = f"=C{linha}+D{linha}+E{linha}+F{linha}"
-
-                for col_id in range(1, 8):
-                    cell = ws.cell(row=linha, column=col_id)
-                    cell.fill = cinza
-                    cell.border = borda
-
-                linha += 1
-
-            if linha - 1 >= inicio_bloco:
-                ws.merge_cells(start_row=inicio_bloco, end_row=linha - 1, start_column=1, end_column=1)
-                ws.cell(row=inicio_bloco, column=1).value = str(data_item)
-
-        ws.cell(row=linha, column=1).value = "TOTAL"
-        ws.cell(row=linha, column=2).value = f"=COUNTA(B4:B{linha-1})"
-
-        for col_id in range(3, 8):
-            letra = chr(64 + col_id)
-            ws.cell(row=linha, column=col_id).value = f"=SUM({letra}4:{letra}{linha-1})"
-
-        for col_id in range(1, 8):
-            cell = ws.cell(row=linha, column=col_id)
-            cell.fill = cinza_total
-            cell.border = borda
-
-        grafico_inicio = linha + 2
-        ws.cell(row=grafico_inicio, column=2, value="TIPO")
-        ws.cell(row=grafico_inicio, column=3, value="TOTAL")
-
-        tipos = ["ADESAO", "DEMOLIDO", "AUSENTE", "RECUSA"]
-        linha_chart = grafico_inicio + 1
-        for tipo in tipos:
-            valor = dados_asro[dados_asro["TIPO_CLASS"] == tipo].shape[0]
-            ws.cell(row=linha_chart, column=2).value = tipo
-            ws.cell(row=linha_chart, column=3).value = valor
-            linha_chart += 1
-
-        chart = BarChart()
-        chart.title = "Resumo por Atendimento"
-
-        data_ref = Reference(ws, min_col=3, min_row=grafico_inicio, max_row=linha_chart - 1)
-        cats_ref = Reference(ws, min_col=2, min_row=grafico_inicio + 1, max_row=linha_chart - 1)
-
-        chart.add_data(data_ref, titles_from_data=True)
-        chart.set_categories(cats_ref)
-        ws.add_chart(chart, f"I{grafico_inicio}")
-
-        ws.column_dimensions["A"].width = 15
-        ws.column_dimensions["B"].width = 35
-        ws.column_dimensions["C"].width = 15
-        ws.column_dimensions["D"].width = 20
-        ws.column_dimensions["E"].width = 20
-        ws.column_dimensions["F"].width = 20
-        ws.column_dimensions["G"].width = 18
-
-    ws_dash = wb.create_sheet("DASHBOARD")
-    ws_dash["A1"] = "DASHBOARD GERAL"
-    ws_dash["A1"].font = Font(size=16, bold=True)
-
-    total_adesao = len(df[df["TIPO_CLASS"] == "ADESAO"])
-    total_demolido = len(df[df["TIPO_CLASS"] == "DEMOLIDO"])
-    total_ausente = len(df[df["TIPO_CLASS"] == "AUSENTE"])
-    total_recusa = len(df[df["TIPO_CLASS"] == "RECUSA"])
-
-    ws_dash["A3"] = "TIPO"
-    ws_dash["B3"] = "TOTAL"
-    ws_dash.append(["ADESÃO", total_adesao])
-    ws_dash.append(["DEMOLIDO", total_demolido])
-    ws_dash.append(["AUSENTE", total_ausente])
-    ws_dash.append(["RECUSA", total_recusa])
-
-    chart = BarChart()
-    chart.title = "Resumo Geral de Atendimentos"
-
-    data_ref = Reference(ws_dash, min_col=2, min_row=3, max_row=7)
-    cats_ref = Reference(ws_dash, min_col=1, min_row=4, max_row=7)
-
-    chart.add_data(data_ref, titles_from_data=True)
-    chart.set_categories(cats_ref)
-    chart.style = 10
-    ws_dash.add_chart(chart, "D5")
-
-    nome_arquivo = f"relatorio_agentes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    return excel_bytes_from_wb(wb), nome_arquivo
-
-
-# =========================
-# 4) RELATÓRIO ENVIO / VISITAS / ADESÕES
-# =========================
-def processar_relatorio_envio_visitas_adesoes(uploaded_file):
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-    from openpyxl.chart import BarChart, Reference
-
-    def encontrar_coluna(df_local, palavras):
-        colunas_normalizadas = {}
-        for col in df_local.columns:
-            col_norm = normalize_text(col)
-            colunas_normalizadas[col] = col_norm
-        for col_original, col_norm in colunas_normalizadas.items():
-            if all(normalize_text(p) in col_norm for p in palavras):
-                return col_original
-        return None
-
-    def classificar_tipo_atendimento(valor):
-        v = normalize_text(valor)
-        if "ADESAO REALIZADA" in v and "MORADOR PRESENTE" in v:
-            return "ADESÕES"
-        if "AGENDAMENTO" in v:
-            return "AGENDAMENTOS"
-        if "MORADOR AUSENTE" in v:
-            return "MORADORES AUSENTES"
-        if "RECUSA" in v:
-            return "RECUSAS"
-        return None
-
-    def calcular_metricas(df_base, col_data, col_agente, col_tipo):
-        visitas_totais = df_base[col_data].notna().sum()
-        dias_trabalhados = df_base[col_data].dropna().nunique()
-        media_visitas_diarias = visitas_totais / dias_trabalhados if dias_trabalhados > 0 else 0
-
-        df_validos = df_base[df_base["TIPO_CLASS"].notna()].copy()
-        imoveis_visitados = len(df_validos)
-
-        adesoes = (df_validos["TIPO_CLASS"] == "ADESÕES").sum()
-        agendamentos = (df_validos["TIPO_CLASS"] == "AGENDAMENTOS").sum()
-        moradores_ausentes = (df_validos["TIPO_CLASS"] == "MORADORES AUSENTES").sum()
-        recusas = (df_validos["TIPO_CLASS"] == "RECUSAS").sum()
-
-        def percentual(valor):
-            return valor / imoveis_visitados if imoveis_visitados > 0 else 0
-
-        return {
-            "Visitas totais": visitas_totais,
-            "Imóveis visitados": imoveis_visitados,
-            "Média visitas diárias": round(media_visitas_diarias, 2),
-            "Dias trabalhados": dias_trabalhados,
-            "Moradores ausentes": moradores_ausentes,
-            "% Moradores ausentes": percentual(moradores_ausentes),
-            "Adesões": adesoes,
-            "% Adesões": percentual(adesoes),
-            "Recusas": recusas,
-            "% Recusas": percentual(recusas),
-            "Agendamentos": agendamentos,
-            "% Agendamentos": percentual(agendamentos),
-        }
-
-    def aplicar_layout_resumo(ws):
-        verde_escuro = PatternFill(start_color="006400", fill_type="solid")
-        verde_medio = PatternFill(start_color="0DB39E", fill_type="solid")
-        branco = Font(color="FFFFFF", bold=True)
-        negrito = Font(bold=True)
-
-        borda = Border(
-            left=Side(style="thin"),
-            right=Side(style="thin"),
-            top=Side(style="thin"),
-            bottom=Side(style="thin")
-        )
-
-        ws.merge_cells("A1:D1")
-        ws["A1"] = "RELATÓRIO DE ADESÕES, VISITAS E ÁREAS CORRELATAS"
-        ws["A1"].fill = verde_escuro
-        ws["A1"].font = Font(color="FFFFFF", bold=True, size=14)
-        ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
-
-        for cell in ws[3]:
-            cell.fill = verde_medio
-            cell.font = branco
-            cell.alignment = Alignment(horizontal="center")
-            cell.border = borda
-
-        for row in ws.iter_rows():
-            for cell in row:
-                if cell.row > 3 and cell.value is not None:
-                    cell.border = borda
-                    if cell.column in [1, 3]:
-                        cell.font = negrito
-
-        ws.column_dimensions["A"].width = 28
-        ws.column_dimensions["B"].width = 18
-        ws.column_dimensions["C"].width = 25
-        ws.column_dimensions["D"].width = 18
-
-    def aplicar_layout_tabela(ws):
-        verde_escuro = PatternFill(start_color="006400", fill_type="solid")
-        verde_medio = PatternFill(start_color="0DB39E", fill_type="solid")
-        cinza = PatternFill(start_color="D9D9D9", fill_type="solid")
-        branco = Font(color="FFFFFF", bold=True)
-
-        borda = Border(
-            left=Side(style="thin"),
-            right=Side(style="thin"),
-            top=Side(style="thin"),
-            bottom=Side(style="thin")
-        )
-
-        for row in ws.iter_rows():
-            for cell in row:
-                if cell.value is not None:
-                    cell.border = borda
-                    if cell.row == 1:
-                        cell.fill = verde_escuro
-                        cell.font = Font(color="FFFFFF", bold=True, size=14)
-                        cell.alignment = Alignment(horizontal="center")
-                    elif cell.row == 3:
-                        cell.fill = verde_medio
-                        cell.font = branco
-                        cell.alignment = Alignment(horizontal="center")
-                    elif cell.row > 3:
-                        cell.fill = cinza
-
-        larguras = {"A": 25, "B": 18, "C": 18, "D": 18, "E": 18, "F": 18, "G": 18}
-        for col, width in larguras.items():
-            ws.column_dimensions[col].width = width
-
-    def criar_grafico_indicadores(ws, linha_inicio, titulo, posicao):
-        chart = BarChart()
-        chart.title = titulo
-        chart.y_axis.title = "Quantidade"
-        chart.x_axis.title = "Indicadores"
-
-        data_ref = Reference(ws, min_col=2, min_row=linha_inicio, max_row=linha_inicio + 4)
-        cats_ref = Reference(ws, min_col=1, min_row=linha_inicio + 1, max_row=linha_inicio + 4)
-
-        chart.add_data(data_ref, titles_from_data=True)
-        chart.set_categories(cats_ref)
-        chart.height = 8
-        chart.width = 14
-        ws.add_chart(chart, posicao)
-
-    df = read_excel_any(uploaded_file)
-    df.columns = df.columns.str.strip()
+    df.columns = df.columns.astype(str).str.strip()
 
     col_asro = encontrar_coluna(df, ["ASRO"])
-    col_tipo = encontrar_coluna(df, ["TIPO", "ATENDIMENTO"])
     col_agente = encontrar_coluna(df, ["NOME", "AGENTE"])
-    col_data = encontrar_coluna(df, ["DATA", "REGISTRO"])
+    col_tipo = encontrar_coluna(df, ["TIPO", "ATENDIMENTO"])
+    col_data = encontrar_coluna(df, ["DATA"])
 
     faltando = []
-    if not col_asro:
-        faltando.append("ASRO")
-    if not col_tipo:
-        faltando.append("Tipo de atendimento")
-    if not col_agente:
-        faltando.append("Nome do agente")
-    if not col_data:
-        faltando.append("Data do registro")
+    if not col_asro: faltando.append("ASRO")
+    if not col_agente: faltando.append("Nome do agente")
+    if not col_tipo: faltando.append("Tipo de atendimento")
+    if not col_data: faltando.append("Data")
     if faltando:
         raise ValueError("Colunas obrigatórias não encontradas: " + ", ".join(faltando))
 
@@ -666,151 +348,402 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
     wb = Workbook()
     wb.remove(wb.active)
 
+    for asro, dados_asro in df.groupby(col_asro):
+        ws = wb.create_sheet(safe_sheet_name(asro))
+        tabela = dados_asro.groupby([col_data, col_agente, "TIPO_CLASS"]).size().reset_index(name="TOTAL")
+        ws.append(["DATA", "AGENTE", "TIPO", "TOTAL"])
+        for _, r in tabela.iterrows():
+            ws.append([str(r[col_data]), r[col_agente], r["TIPO_CLASS"], int(r["TOTAL"])])
+        aplicar_bordas_e_larguras(ws)
+
+    return excel_bytes_from_wb(wb), f"relatorio_agentes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+
+# =========================================================
+# 4) RELATÓRIO ENVIO / VISITAS / ADESÕES
+# =========================================================
+def processar_relatorio_envio_visitas_adesoes(uploaded_file):
+    # Mantém relatório funcional em layout simples
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.chart import BarChart, Reference
+
+    df = read_excel_any(uploaded_file)
+    df.columns = df.columns.astype(str).str.strip()
+
+    col_asro = encontrar_coluna(df, ["ASRO"])
+    col_tipo = encontrar_coluna(df, ["TIPO", "ATENDIMENTO"])
+    col_agente = encontrar_coluna(df, ["NOME", "AGENTE"])
+    col_data = encontrar_coluna(df, ["DATA", "REGISTRO"]) or encontrar_coluna(df, ["DATA"])
+
+    faltando = []
+    if not col_asro: faltando.append("ASRO")
+    if not col_tipo: faltando.append("Tipo de atendimento")
+    if not col_agente: faltando.append("Nome do agente")
+    if not col_data: faltando.append("Data do registro")
+    if faltando:
+        raise ValueError("Colunas obrigatórias não encontradas: " + ", ".join(faltando))
+
+    df[col_data] = pd.to_datetime(df[col_data], errors="coerce").dt.date
+    df["TIPO_CLASS"] = df[col_tipo].apply(classificar_tipo_atendimento)
+
+    def metricas(base):
+        total = len(base)
+        dias = base[col_data].dropna().nunique()
+        return {
+            "Visitas totais": total,
+            "Imóveis visitados": total,
+            "Média visitas diárias": round(total / dias, 2) if dias else 0,
+            "Dias trabalhados": dias,
+            "Moradores ausentes": int((base["TIPO_CLASS"] == "AUSENTES").sum()),
+            "Adesões": int((base["TIPO_CLASS"] == "ADESÕES").sum()),
+            "Recusas": int((base["TIPO_CLASS"] == "RECUSAS").sum()),
+            "Agendamentos": int((base["TIPO_CLASS"] == "AGENDAMENTOS").sum()),
+        }
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    verde = PatternFill(start_color="006400", fill_type="solid")
+    verde_medio = PatternFill(start_color="0DB39E", fill_type="solid")
+    branco = Font(color="FFFFFF", bold=True)
+    borda = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
+
+    def criar_resumo(ws, titulo, base):
+        m = metricas(base)
+        ws.append([titulo])
+        ws.append([])
+        ws.append(["Indicador", "Valor"])
+        for k, v in m.items():
+            ws.append([k, v])
+        ws.merge_cells("A1:B1")
+        ws["A1"].fill = verde
+        ws["A1"].font = branco
+        ws["A1"].alignment = Alignment(horizontal="center")
+        for cell in ws[3]:
+            cell.fill = verde_medio
+            cell.font = branco
+            cell.alignment = Alignment(horizontal="center")
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value is not None:
+                    cell.border = borda
+        inicio = 13
+        ws.cell(row=inicio, column=1, value="Indicador")
+        ws.cell(row=inicio, column=2, value="Total")
+        dados = [("Adesões", m["Adesões"]), ("Moradores ausentes", m["Moradores ausentes"]), ("Recusas", m["Recusas"]), ("Agendamentos", m["Agendamentos"])]
+        for idx, (ind, val) in enumerate(dados, start=inicio + 1):
+            ws.cell(row=idx, column=1, value=ind)
+            ws.cell(row=idx, column=2, value=val)
+        chart = BarChart()
+        chart.title = titulo
+        data_ref = Reference(ws, min_col=2, min_row=inicio, max_row=inicio + 4)
+        cats_ref = Reference(ws, min_col=1, min_row=inicio + 1, max_row=inicio + 4)
+        chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(cats_ref)
+        ws.add_chart(chart, "E3")
+        aplicar_bordas_e_larguras(ws)
+
     ws_geral = wb.create_sheet("GERAL")
-    metricas_geral = calcular_metricas(df, col_data, col_agente, col_tipo)
+    criar_resumo(ws_geral, "RELATÓRIO DE ADESÕES, VISITAS E ÁREAS CORRELATAS", df)
+    for asro, dados_asro in sorted(df.groupby(col_asro), key=lambda x: str(x[0])):
+        ws = wb.create_sheet(safe_sheet_name(asro))
+        criar_resumo(ws, f"RELATÓRIO - {asro}", dados_asro)
+        linha = 22
+        headers = ["Agente", "Visitas totais", "Imóveis visitados", "Adesões", "Ausentes", "Recusas", "Agendamentos"]
+        for c, h in enumerate(headers, start=1):
+            ws.cell(row=linha, column=c, value=h)
+        linha += 1
+        for agente, dados_agente in dados_asro.groupby(col_agente):
+            ma = metricas(dados_agente)
+            valores = [excel_value(agente), ma["Visitas totais"], ma["Imóveis visitados"], ma["Adesões"], ma["Moradores ausentes"], ma["Recusas"], ma["Agendamentos"]]
+            for c, v in enumerate(valores, start=1):
+                ws.cell(row=linha, column=c, value=excel_value(v))
+            linha += 1
+        aplicar_bordas_e_larguras(ws)
+    return excel_bytes_from_wb(wb), f"Relatorio_Adesoes_Visitas_Areas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
-    ws_geral.append(["RELATÓRIO DE ADESÕES, VISITAS E ÁREAS CORRELATAS"])
-    ws_geral.append([])
-    ws_geral.append(["Indicador", "Valor", "Indicador Percentual", "Percentual"])
 
-    ws_geral.append(["Visitas totais", metricas_geral["Visitas totais"], "", ""])
-    ws_geral.append(["Imóveis visitados", metricas_geral["Imóveis visitados"], "", ""])
-    ws_geral.append(["Média visitas diárias", metricas_geral["Média visitas diárias"], "", ""])
-    ws_geral.append(["Dias trabalhados", metricas_geral["Dias trabalhados"], "", ""])
-    ws_geral.append(["Moradores ausentes", metricas_geral["Moradores ausentes"], "% Moradores ausentes", metricas_geral["% Moradores ausentes"]])
-    ws_geral.append(["Adesões", metricas_geral["Adesões"], "% Adesões", metricas_geral["% Adesões"]])
-    ws_geral.append(["Recusas", metricas_geral["Recusas"], "% Recusas", metricas_geral["% Recusas"]])
-    ws_geral.append(["Agendamentos", metricas_geral["Agendamentos"], "% Agendamentos", metricas_geral["% Agendamentos"]])
+# =========================================================
+# 5) ACOMPANHAMENTO DIÁRIO
+# =========================================================
+def preparar_acompanhamento(arquivos):
+    bases = []
+    for arquivo in arquivos:
+        df = read_excel_any(arquivo)
+        df.columns = df.columns.astype(str).str.strip()
+        df["ARQUIVO_ORIGEM"] = arquivo.name
+        bases.append(df)
+    if not bases:
+        raise ValueError("Nenhum arquivo enviado.")
+    df = pd.concat(bases, ignore_index=True)
 
-    for row in range(8, 12):
-        ws_geral.cell(row=row, column=4).number_format = "0.00%"
+    col_asro = encontrar_coluna(df, ["ASRO"])
+    col_agente = encontrar_coluna(df, ["NOME", "AGENTE"])
+    col_data = encontrar_coluna(df, ["DATA", "REGISTRO"]) or encontrar_coluna(df, ["DATA"])
+    col_horario = encontrar_coluna(df, ["HORARIO", "REGISTRO"]) or encontrar_coluna(df, ["HORA", "REGISTRO"])
+    col_tipo = encontrar_coluna(df, ["TIPO", "ATENDIMENTO"])
+    faltando = []
+    if not col_asro: faltando.append("ASRO")
+    if not col_agente: faltando.append("Nome do agente")
+    if not col_data: faltando.append("Data do registro")
+    if not col_horario: faltando.append("Horário de registro")
+    if not col_tipo: faltando.append("Tipo de atendimento")
+    if faltando:
+        raise ValueError("Colunas obrigatórias não encontradas: " + ", ".join(faltando))
 
-    aplicar_layout_resumo(ws_geral)
+    df["DATA_REGISTRO_TRATADA"] = pd.to_datetime(df[col_data], errors="coerce").dt.date
+    horario_str = df[col_horario].astype(str).str.strip()
+    hora_dt = pd.to_datetime(horario_str, errors="coerce").dt.hour
+    hora_num = pd.to_numeric(horario_str.str.extract(r"(\d{1,2})", expand=False), errors="coerce")
+    df["HORA_EXTRAIDA"] = hora_dt.fillna(hora_num).astype("Int64")
+    df["PERIODO"] = df["HORA_EXTRAIDA"].apply(classificar_periodo)
+    df["ASRO"] = df[col_asro].astype(str).str.strip()
+    df["AGENTE"] = df[col_agente].astype(str).str.strip()
+    df["TIPO_ORIGINAL"] = df[col_tipo].astype(str).str.strip()
+    df["TIPO_CLASS"] = df[col_tipo].apply(classificar_tipo_atendimento)
 
-    grafico_linha = 14
-    ws_geral.cell(row=grafico_linha, column=1, value="Indicador")
-    ws_geral.cell(row=grafico_linha, column=2, value="Total")
+    df_periodos = df[df["PERIODO"].isin(["MANHÃ", "TARDE"])].copy()
+    cols = {"ASRO": col_asro, "Agente": col_agente, "Data": col_data, "Horário": col_horario, "Tipo de atendimento": col_tipo}
+    return df, df_periodos, cols
 
-    dados_grafico = [
-        ("Adesões", metricas_geral["Adesões"]),
-        ("Moradores ausentes", metricas_geral["Moradores ausentes"]),
-        ("Recusas", metricas_geral["Recusas"]),
-        ("Agendamentos", metricas_geral["Agendamentos"]),
-    ]
 
-    linha = grafico_linha + 1
-    for indicador, valor in dados_grafico:
-        ws_geral.cell(row=linha, column=1, value=indicador)
-        ws_geral.cell(row=linha, column=2, value=valor)
+def resumo_agente_acomp(base, incluir_asro=True):
+    colunas = ["Agente", "Visitas totais", "Imóveis visitados", "Adesões", "Ausentes", "Recusas", "Agendamentos", "Imoveis vagos"]
+    if incluir_asro:
+        colunas = ["ASRO"] + colunas
+    if base.empty:
+        return pd.DataFrame(columns=colunas)
+    grupos = ["ASRO", "AGENTE"] if incluir_asro else "AGENTE"
+    linhas = []
+    for chave, dados in base.groupby(grupos):
+        if incluir_asro:
+            asro, agente = chave
+        else:
+            asro = None
+            agente = excel_value(chave)
+        item = {
+            "Agente": excel_value(agente),
+            "Visitas totais": len(dados),
+            "Imóveis visitados": len(dados),
+            "Adesões": int((dados["TIPO_CLASS"] == "ADESÕES").sum()),
+            "Ausentes": int((dados["TIPO_CLASS"] == "AUSENTES").sum()),
+            "Recusas": int((dados["TIPO_CLASS"] == "RECUSAS").sum()),
+            "Agendamentos": int((dados["TIPO_CLASS"] == "AGENDAMENTOS").sum()),
+            "Imoveis vagos": int(dados["TIPO_ORIGINAL"].astype(str).apply(lambda x: "VAGO" in normalize_text(x)).sum()),
+        }
+        if incluir_asro:
+            item = {"ASRO": excel_value(asro), **item}
+        linhas.append(item)
+    return pd.DataFrame(linhas).sort_values("Visitas totais", ascending=False)
+
+
+def relatorio_final_simplificado(df_base):
+    if df_base.empty:
+        return pd.DataFrame(columns=["ASRO", "Agente", "Período", "Horários", "Visitas", "Adesões", "Ausentes", "Recusas", "Agendamentos", "Imoveis vagos", "Principal atendimento"])
+    linhas = []
+    for (asro, agente, periodo), dados in df_base.groupby(["ASRO", "AGENTE", "PERIODO"]):
+        tipos = dados["TIPO_ORIGINAL"].value_counts()
+        principal = tipos.index[0] if len(tipos) else ""
+        horarios = ", ".join(str(int(h)) for h in sorted(dados["HORA_EXTRAIDA"].dropna().unique()))
+        linhas.append({
+            "ASRO": asro,
+            "Agente": agente,
+            "Período": periodo,
+            "Horários": horarios,
+            "Visitas": len(dados),
+            "Adesões": int((dados["TIPO_CLASS"] == "ADESÕES").sum()),
+            "Ausentes": int((dados["TIPO_CLASS"] == "AUSENTES").sum()),
+            "Recusas": int((dados["TIPO_CLASS"] == "RECUSAS").sum()),
+            "Agendamentos": int((dados["TIPO_CLASS"] == "AGENDAMENTOS").sum()),
+            "Imoveis vagos": int(dados["TIPO_ORIGINAL"].astype(str).apply(lambda x: "VAGO" in normalize_text(x)).sum()),
+            "Principal atendimento": principal,
+        })
+    return pd.DataFrame(linhas).sort_values(["ASRO", "Período", "Visitas"], ascending=[True, True, False])
+
+
+def montar_resumo_geral_acompanhamento(df_periodos):
+    resumo_asro = df_periodos.groupby("ASRO").agg(Visitas=("AGENTE", "size"), Agentes=("AGENTE", "nunique")).reset_index()
+    resumo_asro["Média por agente"] = resumo_asro.apply(lambda r: round(r["Visitas"] / r["Agentes"], 2) if r["Agentes"] else 0, axis=1)
+    resumo_asro = resumo_asro[["ASRO", "Visitas", "Média por agente"]].sort_values("Visitas", ascending=False)
+
+    ranking = df_periodos.groupby(["AGENTE", "ASRO"]).size().reset_index(name="Visitas").sort_values("Visitas", ascending=False).reset_index(drop=True)
+    ranking.insert(0, "RANKING", ranking.index + 1)
+    datas = sorted([str(x) for x in df_periodos["DATA_REGISTRO_TRATADA"].dropna().unique()])
+    return {
+        "datas": ", ".join(datas),
+        "extracao": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "asros_atuando": df_periodos["ASRO"].nunique(),
+        "total_registros": len(df_periodos),
+        "total_agentes": df_periodos["AGENTE"].nunique(),
+        "resumo_asro": resumo_asro,
+        "ranking": ranking,
+    }
+
+
+def montar_resumo_agente_por_faixa(dados_agente):
+    if dados_agente.empty:
+        return pd.DataFrame(columns=["Período", "Visitas", "Adesões", "Ausentes", "Recusas", "Agendamentos", "Imoveis vagos"])
+    dados_agente = dados_agente.copy()
+    dados_agente["FAIXA_EXCEL"] = dados_agente["HORA_EXTRAIDA"].apply(classificar_faixa_horario_excel)
+    linhas = []
+    for faixa in ["MANHÃ 1", "MANHÃ 2", "TARDE 1", "TARDE 2"]:
+        bloco = dados_agente[dados_agente["FAIXA_EXCEL"] == faixa]
+        if bloco.empty:
+            continue
+        linhas.append({
+            "Período": faixa,
+            "Visitas": len(bloco),
+            "Adesões": int((bloco["TIPO_CLASS"] == "ADESÕES").sum()),
+            "Ausentes": int((bloco["TIPO_CLASS"] == "AUSENTES").sum()),
+            "Recusas": int((bloco["TIPO_CLASS"] == "RECUSAS").sum()),
+            "Agendamentos": int((bloco["TIPO_CLASS"] == "AGENDAMENTOS").sum()),
+            "Imoveis vagos": int(bloco["TIPO_ORIGINAL"].astype(str).apply(lambda x: "VAGO" in normalize_text(x)).sum()),
+        })
+    linhas.append({
+        "Período": "TOTAL",
+        "Visitas": len(dados_agente),
+        "Adesões": int((dados_agente["TIPO_CLASS"] == "ADESÕES").sum()),
+        "Ausentes": int((dados_agente["TIPO_CLASS"] == "AUSENTES").sum()),
+        "Recusas": int((dados_agente["TIPO_CLASS"] == "RECUSAS").sum()),
+        "Agendamentos": int((dados_agente["TIPO_CLASS"] == "AGENDAMENTOS").sum()),
+        "Imoveis vagos": int(dados_agente["TIPO_ORIGINAL"].astype(str).apply(lambda x: "VAGO" in normalize_text(x)).sum()),
+    })
+    return pd.DataFrame(linhas)
+
+
+def gerar_excel_acompanhamento(df_periodos):
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    verde = PatternFill(start_color="00B050", fill_type="solid")
+    verde_escuro = PatternFill(start_color="006400", fill_type="solid")
+    cinza = PatternFill(start_color="D9D9D9", fill_type="solid")
+    cinza_claro = PatternFill(start_color="F2F2F2", fill_type="solid")
+    branco = Font(color="FFFFFF", bold=True)
+    fonte_titulo = Font(color="1F2937", bold=True, size=14)
+    fonte_negrito = Font(bold=True)
+    borda = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
+
+    def estilizar_range(ws):
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value is not None:
+                    cell.border = borda
+                    cell.alignment = Alignment(vertical="center")
+        for col_idx, col_cells in enumerate(ws.columns, start=1):
+            max_len = 0
+            for cell in col_cells:
+                if cell.value is not None:
+                    max_len = max(max_len, len(str(cell.value)))
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 4, 55)
+
+    def escrever_df(ws, df, row, col, header_fill=cinza):
+        for j, nome_col in enumerate(df.columns, start=col):
+            cell = ws.cell(row=row, column=j, value=str(nome_col))
+            cell.fill = header_fill
+            cell.font = fonte_negrito
+            cell.border = borda
+            cell.alignment = Alignment(horizontal="center")
+        for i, linha in enumerate(df.itertuples(index=False), start=row + 1):
+            for j, valor in enumerate(linha, start=col):
+                cell = ws.cell(row=i, column=j, value=excel_value(valor))
+                cell.border = borda
+                cell.fill = cinza_claro if i % 2 == 0 else PatternFill(fill_type=None)
+        return row + len(df) + 2
+
+    # ABA GERAL
+    geral = montar_resumo_geral_acompanhamento(df_periodos)
+    ws = wb.create_sheet("GERAL")
+    ws.merge_cells("A1:E1")
+    ws["A1"] = "ACOMPANHAMENTO DIÁRIO - PRODUTIVIDADE DOS AGENTES"
+    ws["A1"].fill = verde
+    ws["A1"].font = fonte_titulo
+    ws["A1"].alignment = Alignment(horizontal="center")
+
+    labels = ["Data(s) filtrada(s)", "Horário da extração", "ASROs atuando", "Total de registros", "Total de agentes"]
+    valores = [geral["datas"], geral["extracao"], geral["asros_atuando"], geral["total_registros"], geral["total_agentes"]]
+    for idx, label in enumerate(labels, start=3):
+        ws.cell(row=idx, column=1, value=label).font = fonte_negrito
+        ws.cell(row=idx, column=2, value=valores[idx - 3])
+
+    ws.cell(row=9, column=1, value="ASRO").fill = cinza
+    ws.cell(row=9, column=2, value="Visitas").fill = cinza
+    ws.cell(row=9, column=3, value="Média por agente").fill = cinza
+    for c in range(1, 4):
+        ws.cell(row=9, column=c).font = fonte_negrito
+        ws.cell(row=9, column=c).alignment = Alignment(horizontal="center")
+    linha = 10
+    for _, r in geral["resumo_asro"].iterrows():
+        ws.cell(row=linha, column=1, value=r["ASRO"])
+        ws.cell(row=linha, column=2, value=int(r["Visitas"]))
+        ws.cell(row=linha, column=3, value=float(r["Média por agente"]))
         linha += 1
 
-    criar_grafico_indicadores(ws_geral, grafico_linha, "Resumo Geral", "F3")
+    ranking_start = 9
+    for c, label in zip(range(5, 9), ["RANKING", "AGENTE", "ASRO", "Visitas"]):
+        ws.cell(row=ranking_start, column=c, value=label).fill = cinza
+        ws.cell(row=ranking_start, column=c).font = fonte_negrito
+        ws.cell(row=ranking_start, column=c).alignment = Alignment(horizontal="center")
+    linha_rank = ranking_start + 1
+    for _, r in geral["ranking"].iterrows():
+        ws.cell(row=linha_rank, column=5, value=int(r["RANKING"]))
+        ws.cell(row=linha_rank, column=6, value=r["AGENTE"])
+        ws.cell(row=linha_rank, column=7, value=r["ASRO"])
+        ws.cell(row=linha_rank, column=8, value=int(r["Visitas"]))
+        linha_rank += 1
+    estilizar_range(ws)
 
-    linha_asro = 22
-    ws_geral.cell(row=linha_asro, column=1, value="ASRO")
-    ws_geral.cell(row=linha_asro, column=2, value="Visitas totais")
-    ws_geral.cell(row=linha_asro, column=3, value="Imóveis visitados")
-    ws_geral.cell(row=linha_asro, column=4, value="Adesões")
-    ws_geral.cell(row=linha_asro, column=5, value="% Adesões")
-    ws_geral.cell(row=linha_asro, column=6, value="Ausentes")
-    ws_geral.cell(row=linha_asro, column=7, value="% Ausentes")
-    ws_geral.cell(row=linha_asro, column=8, value="Recusas")
-    ws_geral.cell(row=linha_asro, column=9, value="% Recusas")
-
-    linha_asro += 1
-    grupos = sorted(df.groupby(col_asro), key=lambda x: str(x[0]))
-
-    for asro, dados_asro in grupos:
-        m = calcular_metricas(dados_asro, col_data, col_agente, col_tipo)
-        ws_geral.cell(row=linha_asro, column=1, value=str(asro))
-        ws_geral.cell(row=linha_asro, column=2, value=m["Visitas totais"])
-        ws_geral.cell(row=linha_asro, column=3, value=m["Imóveis visitados"])
-        ws_geral.cell(row=linha_asro, column=4, value=m["Adesões"])
-        ws_geral.cell(row=linha_asro, column=5, value=m["% Adesões"])
-        ws_geral.cell(row=linha_asro, column=6, value=m["Moradores ausentes"])
-        ws_geral.cell(row=linha_asro, column=7, value=m["% Moradores ausentes"])
-        ws_geral.cell(row=linha_asro, column=8, value=m["Recusas"])
-        ws_geral.cell(row=linha_asro, column=9, value=m["% Recusas"])
-
-        ws_geral.cell(row=linha_asro, column=5).number_format = "0.00%"
-        ws_geral.cell(row=linha_asro, column=7).number_format = "0.00%"
-        ws_geral.cell(row=linha_asro, column=9).number_format = "0.00%"
-        linha_asro += 1
-
-    for asro, dados_asro in grupos:
-        ws = wb.create_sheet(safe_sheet_name(str(asro)))
-        metricas = calcular_metricas(dados_asro, col_data, col_agente, col_tipo)
-
-        ws.append([f"RELATÓRIO - {asro}"])
-        ws.append([])
-        ws.append(["Indicador", "Valor", "Indicador Percentual", "Percentual"])
-
-        ws.append(["Visitas totais", metricas["Visitas totais"], "", ""])
-        ws.append(["Imóveis visitados", metricas["Imóveis visitados"], "", ""])
-        ws.append(["Média visitas diárias", metricas["Média visitas diárias"], "", ""])
-        ws.append(["Dias trabalhados", metricas["Dias trabalhados"], "", ""])
-        ws.append(["Moradores ausentes", metricas["Moradores ausentes"], "% Moradores ausentes", metricas["% Moradores ausentes"]])
-        ws.append(["Adesões", metricas["Adesões"], "% Adesões", metricas["% Adesões"]])
-        ws.append(["Recusas", metricas["Recusas"], "% Recusas", metricas["% Recusas"]])
-        ws.append(["Agendamentos", metricas["Agendamentos"], "% Agendamentos", metricas["% Agendamentos"]])
-
-        for row in range(8, 12):
-            ws.cell(row=row, column=4).number_format = "0.00%"
-
-        aplicar_layout_resumo(ws)
-
-        grafico_linha = 14
-        ws.cell(row=grafico_linha, column=1, value="Indicador")
-        ws.cell(row=grafico_linha, column=2, value="Total")
-
-        dados_grafico_asro = [
-            ("Adesões", metricas["Adesões"]),
-            ("Moradores ausentes", metricas["Moradores ausentes"]),
-            ("Recusas", metricas["Recusas"]),
-            ("Agendamentos", metricas["Agendamentos"]),
-        ]
-
-        linha = grafico_linha + 1
-        for indicador, valor in dados_grafico_asro:
-            ws.cell(row=linha, column=1, value=indicador)
-            ws.cell(row=linha, column=2, value=valor)
+    # ABAS POR ASRO
+    for asro, dados_asro in df_periodos.groupby("ASRO"):
+        ws_asro = wb.create_sheet(safe_sheet_name(asro))
+        ws_asro.merge_cells("A1:G1")
+        ws_asro["A1"] = f"ACOMPANHAMENTO DIÁRIO - ASRO {asro}"
+        ws_asro["A1"].fill = verde
+        ws_asro["A1"].font = fonte_titulo
+        ws_asro["A1"].alignment = Alignment(horizontal="center")
+        ws_asro.cell(row=3, column=1, value="Total de registros").font = fonte_negrito
+        ws_asro.cell(row=3, column=2, value="Total de agentes").font = fonte_negrito
+        ws_asro.cell(row=4, column=1, value=len(dados_asro))
+        ws_asro.cell(row=4, column=2, value=dados_asro["AGENTE"].nunique())
+        ws_asro.cell(row=6, column=1, value="* MANHÃ 1 - 10H | MANHÃ 2 - 11H/12H | TARDE 1 - 15H | TARDE 2 - 17H/18H")
+        ws_asro.cell(row=6, column=1).font = fonte_negrito
+        linha = 8
+        for agente, dados_agente in sorted(dados_asro.groupby("AGENTE"), key=lambda x: str(x[0])):
+            ws_asro.merge_cells(start_row=linha, start_column=1, end_row=linha, end_column=7)
+            cell_agente = ws_asro.cell(row=linha, column=1, value=str(agente))
+            cell_agente.fill = verde_escuro
+            cell_agente.font = branco
+            cell_agente.alignment = Alignment(horizontal="left")
             linha += 1
+            tabela_agente = montar_resumo_agente_por_faixa(dados_agente)
+            linha = escrever_df(ws_asro, tabela_agente, linha, 1, header_fill=cinza)
+            linha += 1
+        estilizar_range(ws_asro)
 
-        criar_grafico_indicadores(ws, grafico_linha, f"Resumo {asro}", "F3")
+    # BASE TRATADA
+    ws_base = wb.create_sheet("BASE TRATADA")
+    ws_base["A1"] = "BASE TRATADA"
+    ws_base["A1"].fill = verde
+    ws_base["A1"].font = fonte_titulo
+    base_export = df_periodos[["ARQUIVO_ORIGEM", "DATA_REGISTRO_TRATADA", "HORA_EXTRAIDA", "PERIODO", "ASRO", "AGENTE", "TIPO_ORIGINAL", "TIPO_CLASS"]].copy()
+    escrever_df(ws_base, base_export, 3, 1, header_fill=cinza)
+    estilizar_range(ws_base)
 
-        linha_agente = 22
-        ws.cell(row=linha_agente, column=1, value="Agente")
-        ws.cell(row=linha_agente, column=2, value="Visitas totais")
-        ws.cell(row=linha_agente, column=3, value="Imóveis visitados")
-        ws.cell(row=linha_agente, column=4, value="Adesões")
-        ws.cell(row=linha_agente, column=5, value="Ausentes")
-        ws.cell(row=linha_agente, column=6, value="Recusas")
-        ws.cell(row=linha_agente, column=7, value="Agendamentos")
-
-        linha_agente += 1
-        for agente, dados_agente in sorted(dados_asro.groupby(col_agente), key=lambda x: str(x[0])):
-            m_agente = calcular_metricas(dados_agente, col_data, col_agente, col_tipo)
-            ws.cell(row=linha_agente, column=1, value=str(agente))
-            ws.cell(row=linha_agente, column=2, value=m_agente["Visitas totais"])
-            ws.cell(row=linha_agente, column=3, value=m_agente["Imóveis visitados"])
-            ws.cell(row=linha_agente, column=4, value=m_agente["Adesões"])
-            ws.cell(row=linha_agente, column=5, value=m_agente["Moradores ausentes"])
-            ws.cell(row=linha_agente, column=6, value=m_agente["Recusas"])
-            ws.cell(row=linha_agente, column=7, value=m_agente["Agendamentos"])
-            linha_agente += 1
-
-        aplicar_layout_tabela(ws)
-
-    nome_arquivo = f"Relatorio_Adesoes_Visitas_Areas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    return excel_bytes_from_wb(wb), nome_arquivo
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue(), f"Acompanhamento_Diario_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
 
-# =========================
-# 5) SANDBOX / RELATÓRIO DIÁRIO
-# =========================
+# =========================================================
+# 6) SANDBOX / RELATÓRIO DIÁRIO
+# =========================================================
 def processar_sandbox(uploaded_file):
     df = read_excel_any(uploaded_file, dtype=str)
-
     col_data = None
     col_tipo = None
     for col in df.columns:
@@ -819,44 +752,23 @@ def processar_sandbox(uploaded_file):
             col_data = col
         if "atendimento" in nome:
             col_tipo = col
-
     if col_data:
         df[col_data] = pd.to_datetime(df[col_data], errors="coerce")
-
-    if col_tipo:
-        df["Tipo_Tratado"] = df[col_tipo].astype(str).str.upper()
-    else:
-        df["Tipo_Tratado"] = ""
-
-    def classificar(x):
-        if "ADES" in x:
-            return "Adesão"
-        elif "RECUSA" in x:
-            return "Recusa"
-        elif "AUSENTE" in x:
-            return "Ausente"
-        elif "ABANDONADO" in x:
-            return "Abandonado"
-        elif "AGEND" in x:
-            return "Agendamento"
-        return "Outros"
-
-    df["Status"] = df["Tipo_Tratado"].apply(classificar)
+    df["Tipo_Tratado"] = df[col_tipo].astype(str).str.upper() if col_tipo else ""
+    df["Status"] = df["Tipo_Tratado"].apply(classificar_tipo_atendimento)
     return df, col_data
 
 
-# =========================
-# 6) PROGRAMA EXPORTAÇÃO
-# =========================
+# =========================================================
+# 7) PROGRAMA EXPORTAÇÃO
+# =========================================================
 def processar_programa_exportacao(uploaded_file):
     df = read_excel_any(uploaded_file)
-
     cols_norm = {str(c).strip().lower(): c for c in df.columns}
     required = ["link", "codigo", "data", "cliente"]
     faltantes = [c for c in required if c not in cols_norm]
     if faltantes:
-        raise ValueError(f"Colunas obrigatórias não encontradas: {', '.join(faltantes)}")
-
+        raise ValueError("Colunas obrigatórias não encontradas: " + ", ".join(faltantes))
     df_final = pd.DataFrame()
     df_final["Link Backoffice"] = df[cols_norm["link"]]
     df_final["Code Deep"] = df[cols_norm["codigo"]]
@@ -866,37 +778,24 @@ def processar_programa_exportacao(uploaded_file):
     df_final["Backoffice"] = "OK"
     df_final["Motivos"] = ""
     df_final["Analise"] = ""
-
-    nome_arquivo = "relatorio_final.xlsx"
-    return excel_bytes_from_df(df_final), nome_arquivo
+    return excel_bytes_from_df(df_final), "relatorio_final.xlsx"
 
 
-# =========================
-# ABAS
-# =========================
-tab_filtro, tab_termo, tab_agentes, tab_envio, tab_sandbox, tab_exportacao = st.tabs([
+# =========================================================
+# INTERFACE EM ABAS
+# =========================================================
+tab_filtro, tab_termo, tab_agentes, tab_envio, tab_acompanhamento, tab_sandbox, tab_exportacao = st.tabs([
     "Filtro de Adesões",
     "Termo de Doação",
     "Relatório de Agentes",
     "Relatório Envio / Visitas / Adesões",
+    "Acompanhamento diário",
     "Sandbox / Relatório Diário",
     "Programa Exportação",
 ])
 
 with tab_filtro:
     st.header("Filtro de Adesões")
-    st.write(
-        """
-        **Para que serve:**  
-        Filtra exatamente os registros de **ADESÃO REALIZADA (MORADOR PRESENTE)**  
-        e gera um Excel final formatado, com:
-        - cabeçalho roxo
-        - bordas
-        - largura ajustada automaticamente
-        - mesmas colunas do seu modelo original
-        """
-    )
-
     arquivo = st.file_uploader("Selecione o Excel bruto", type=["xlsx", "xls"], key="filtro_adesoes")
     if arquivo and st.button("Executar Filtro de Adesões", key="btn_filtro"):
         try:
@@ -908,24 +807,11 @@ with tab_filtro:
 
 with tab_termo:
     st.header("Termo de Doação")
-    st.write(
-        """
-        **Para que serve:**  
-        Gera o Termo de Doação de Padrão mantendo a lógica original:
-        - filtra somente clientes marcados como SIM
-        - cria a aba RANKING
-        - gera abas por ASRO
-        - escreve período
-        - aplica cabeçalho e largura formatada
-        - pode incluir logo opcional
-        """
-    )
-
     arquivo = st.file_uploader("Selecione o Excel bruto", type=["xlsx"], key="termo_doacao")
-    logo = st.file_uploader("Logo opcional (PNG/JPG)", type=["png", "jpg", "jpeg"], key="termo_logo")
+    logo = st.file_uploader("Logo opcional", type=["png", "jpg", "jpeg"], key="termo_logo")
     if arquivo and st.button("Gerar Termo de Doação", key="btn_termo"):
         try:
-            data, nome = processar_termo_doacao(arquivo, logo_file=logo)
+            data, nome = processar_termo_doacao(arquivo, logo)
             st.success("Termo gerado com sucesso!")
             st.download_button("Baixar Excel", data=data, file_name=nome, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as e:
@@ -933,19 +819,7 @@ with tab_termo:
 
 with tab_agentes:
     st.header("Relatório de Agentes")
-    st.write(
-        """
-        **Para que serve:**  
-        Gera relatório completo por ASRO e por agente, com:
-        - totais por tipo de atendimento
-        - fórmulas no Excel
-        - abas por ASRO
-        - gráfico por aba
-        - dashboard geral no workbook
-        """
-    )
-
-    arquivo = st.file_uploader("Selecione o Excel bruto", type=["xlsx"], key="rel_agentes")
+    arquivo = st.file_uploader("Selecione o Excel bruto", type=["xlsx", "xls"], key="rel_agentes")
     if arquivo and st.button("Gerar Relatório de Agentes", key="btn_agentes"):
         try:
             data, nome = processar_relatorio_agentes(arquivo)
@@ -956,24 +830,6 @@ with tab_agentes:
 
 with tab_envio:
     st.header("Relatório Envio / Visitas / Adesões")
-    st.write(
-        """
-        **Para que serve:**  
-        Gera um dashboard Excel completo com:
-        - visitas totais
-        - imóveis visitados
-        - adesões
-        - recusas
-        - moradores ausentes
-        - agendamentos
-        - gráficos
-        - resumo geral
-        - resumo por ASRO
-        - abas por ASRO
-        - tabela por agente
-        """
-    )
-
     arquivo = st.file_uploader("Selecione o Excel bruto", type=["xlsx", "xls"], key="rel_envio")
     if arquivo and st.button("Gerar Relatório Envio / Visitas / Adesões", key="btn_envio"):
         try:
@@ -983,91 +839,107 @@ with tab_envio:
         except Exception as e:
             st.error(f"Erro: {e}")
 
+with tab_acompanhamento:
+    st.header("Acompanhamento diário")
+    arquivos = st.file_uploader("Enviar arquivo bruto ou vários arquivos", type=["xlsx", "xls"], accept_multiple_files=True, key="upload_acompanhamento")
+    if arquivos:
+        try:
+            df_original, df_periodos, cols = preparar_acompanhamento(arquivos)
+            st.success(f"Arquivos carregados: {len(arquivos)} | Registros brutos: {len(df_original)} | Registros válidos nos períodos: {len(df_periodos)}")
+            st.caption("Colunas detectadas: " + " | ".join([f"{k}: {v}" for k, v in cols.items()]))
+            if df_periodos.empty:
+                st.warning("Nenhum registro encontrado nos horários: manhã 10h, 11h, 12h; tarde 15h, 17h, 18h.")
+            else:
+                st.subheader("Filtros")
+                f1, f2, f3 = st.columns(3)
+                asros = sorted(df_periodos["ASRO"].dropna().astype(str).unique().tolist())
+                periodos = sorted(df_periodos["PERIODO"].dropna().astype(str).unique().tolist())
+                datas = sorted(df_periodos["DATA_REGISTRO_TRATADA"].dropna().unique().tolist())
+                with f1:
+                    asros_sel = st.multiselect("ASRO", asros, default=asros)
+                with f2:
+                    periodos_sel = st.multiselect("Período", periodos, default=periodos)
+                with f3:
+                    datas_sel = st.multiselect("Data", datas, default=datas)
+
+                df_dash = df_periodos[df_periodos["ASRO"].isin(asros_sel) & df_periodos["PERIODO"].isin(periodos_sel) & df_periodos["DATA_REGISTRO_TRATADA"].isin(datas_sel)].copy()
+                if df_dash.empty:
+                    st.warning("Nenhum dado encontrado com os filtros selecionados.")
+                else:
+                    total_visitas = len(df_dash)
+                    agentes_unicos = df_dash["AGENTE"].nunique()
+                    k1, k2, k3, k4, k5 = st.columns(5)
+                    k1.metric("Total de visitas", total_visitas)
+                    k2.metric("Manhã", int((df_dash["PERIODO"] == "MANHÃ").sum()))
+                    k3.metric("Tarde", int((df_dash["PERIODO"] == "TARDE").sum()))
+                    k4.metric("Total de agentes", agentes_unicos)
+                    k5.metric("Média/agente", round(total_visitas / agentes_unicos, 2) if agentes_unicos else 0)
+
+                    st.subheader("Painel")
+                    col_pizza, col_top = st.columns([1.25, 2])
+                    with col_pizza:
+                        st.markdown("**Distribuição por período**")
+                        periodo = df_dash.groupby("PERIODO").size().reset_index(name="TOTAL")
+                        fig_pie = px.pie(periodo, names="PERIODO", values="TOTAL", hole=0.35, color_discrete_sequence=["#38bdf8", "#22c55e", "#93c5fd"])
+                        fig_pie.update_traces(textposition="inside", textinfo="percent+label+value")
+                        fig_pie.update_layout(height=430, margin=dict(l=10, r=10, t=40, b=10), showlegend=True)
+                        st.plotly_chart(fig_pie, use_container_width=True)
+                    with col_top:
+                        st.markdown("**Top agentes por visitas**")
+                        top_agentes = resumo_agente_acomp(df_dash, incluir_asro=True).head(15)
+                        fig_bar = px.bar(top_agentes, x="Visitas totais", y="Agente", color="ASRO", orientation="h", text="Visitas totais")
+                        fig_bar.update_layout(height=430, yaxis={"categoryorder": "total ascending"})
+                        st.plotly_chart(fig_bar, use_container_width=True)
+
+                    st.subheader("Divisão por período, ASRO e agente")
+                    for periodo_nome in ["MANHÃ", "TARDE"]:
+                        dados_periodo = df_dash[df_dash["PERIODO"] == periodo_nome]
+                        st.markdown(f"### {periodo_nome}")
+                        if dados_periodo.empty:
+                            st.info("Sem registros nesse período.")
+                            continue
+                        for asro_nome in sorted(dados_periodo["ASRO"].dropna().astype(str).unique().tolist()):
+                            dados_asro_periodo = dados_periodo[dados_periodo["ASRO"] == asro_nome]
+                            with st.expander(f"ASRO {asro_nome} - {periodo_nome}", expanded=True):
+                                heat = dados_asro_periodo.groupby(["AGENTE", "HORA_EXTRAIDA"]).size().reset_index(name="VISITAS")
+                                pivot = heat.pivot_table(index="AGENTE", columns="HORA_EXTRAIDA", values="VISITAS", fill_value=0)
+                                pivot = pivot.reindex(sorted(pivot.columns), axis=1)
+                                fig_heat = px.imshow(pivot, text_auto=True, aspect="auto", color_continuous_scale=["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"], labels=dict(x="Horário", y="Agente", color="Visitas"))
+                                fig_heat.update_layout(height=max(280, 28 * len(pivot.index)), margin=dict(l=20, r=20, t=30, b=20))
+                                st.plotly_chart(fig_heat, use_container_width=True)
+                                st.dataframe(resumo_agente_acomp(dados_asro_periodo, incluir_asro=False), use_container_width=True)
+
+                    st.subheader("Relatório final detalhado")
+                    st.dataframe(relatorio_final_simplificado(df_dash), use_container_width=True)
+
+                    st.subheader("Gerar arquivo Excel")
+                    if st.button("Gerar relatório final em Excel", key="btn_excel_acompanhamento"):
+                        excel_data, nome_arquivo = gerar_excel_acompanhamento(df_dash)
+                        st.success("Arquivo Excel gerado com sucesso!")
+                        st.download_button("Baixar Excel do acompanhamento diário", data=excel_data, file_name=nome_arquivo, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as e:
+            st.error(f"Erro ao gerar acompanhamento diário: {e}")
+
 with tab_sandbox:
     st.header("Sandbox / Relatório Diário")
-    st.write(
-        """
-        **Para que serve:**  
-        Exibe análise diária dos atendimentos:
-        - detecta automaticamente coluna de data e atendimento
-        - classifica os status
-        - mostra KPIs
-        - mostra gráfico diário
-        - mostra tabela consolidada
-        - permite baixar o Excel final
-        """
-    )
-
-    arquivo = st.file_uploader("Selecione o Excel", type=["xlsx"], key="sandbox")
+    arquivo = st.file_uploader("Selecione o Excel", type=["xlsx", "xls"], key="sandbox")
     if arquivo:
         try:
-            import plotly.express as px
-
             df, col_data = processar_sandbox(arquivo)
-            total = len(df)
-            adesao = (df["Status"] == "Adesão").sum()
-            recusa = (df["Status"] == "Recusa").sum()
-
             c1, c2, c3 = st.columns(3)
-            c1.metric("Visitas", total)
-            c2.metric("Adesões", adesao)
-            c3.metric("Recusas", recusa)
-
-            st.subheader("Volume diário de visitas")
+            c1.metric("Visitas", len(df))
+            c2.metric("Adesões", (df["Status"] == "ADESÕES").sum())
+            c3.metric("Recusas", (df["Status"] == "RECUSAS").sum())
             if col_data:
                 volume = df.groupby(df[col_data].dt.date).size().reset_index(name="Visitas")
                 volume.columns = ["Data", "Visitas"]
-                volume = volume.sort_values("Data")
-
-                fig = px.line(volume, x="Data", y="Visitas", markers=True, text="Visitas")
-                fig.update_traces(textposition="top center")
-                fig.update_layout(
-                    plot_bgcolor="#f3f7f5",
-                    paper_bgcolor="#f3f7f5",
-                    font=dict(color="#0b6b57"),
-                    xaxis_title="Data",
-                    yaxis_title="Quantidade"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-            st.subheader("Relatório por Data")
-            if col_data:
-                df["Adesão"] = df["Tipo_Tratado"].str.contains("ADES", na=False).astype(int)
-                df["Recusa"] = df["Tipo_Tratado"].str.contains("RECUSA", na=False).astype(int)
-                tabela = df.groupby(df[col_data].dt.date).agg({"Adesão": "sum", "Recusa": "sum"}).reset_index()
-                tabela.columns = ["Data", "Adesão", "Recusa"]
-                tabela = tabela.sort_values("Data")
-
-                total_row = {"Data": "Total", "Adesão": tabela["Adesão"].sum(), "Recusa": tabela["Recusa"].sum()}
-                tabela = pd.concat([tabela, pd.DataFrame([total_row])], ignore_index=True)
-                st.dataframe(tabela, use_container_width=True)
-
-            st.download_button(
-                "Baixar Excel",
-                data=excel_bytes_from_df(df),
-                file_name="Relatorio_Final.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                st.plotly_chart(px.line(volume, x="Data", y="Visitas", markers=True, text="Visitas"), use_container_width=True)
+            st.download_button("Baixar Excel", data=excel_bytes_from_df(df), file_name="Relatorio_Final.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as e:
             st.error(f"Erro: {e}")
 
 with tab_exportacao:
     st.header("Programa Exportação")
-    st.write(
-        """
-        **Para que serve:**  
-        Lê a base operacional e monta o relatório final padronizado com:
-        - Link Backoffice
-        - Code Deep
-        - Data do registro
-        - ASRO
-        - É novo cliente?
-        - Backoffice
-        - Motivos
-        - Analise
-        """
-    )
-
     arquivo = st.file_uploader("Selecione o Excel de entrada", type=["xlsx"], key="exportacao")
     if arquivo and st.button("Executar Exportação", key="btn_exportacao"):
         try:
