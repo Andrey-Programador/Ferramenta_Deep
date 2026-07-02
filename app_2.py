@@ -194,17 +194,34 @@ def classificar_tipo_atendimento(valor):
 # 1) FILTRO DE ADESÕES
 # =========================================================
 
-def gerar_mensagem_resultado_adesoes(df_final):
-    if df_final is None or df_final.empty:
+def gerar_mensagem_resultado_adesoes(df_original, df_final, col_tipo):
+    if df_original is None or df_original.empty:
         return "Resultado sobre adesões:\n\nNenhuma adesão encontrada no arquivo enviado."
 
-    total_adesoes = len(df_final)
+    if not col_tipo:
+        return "Resultado sobre adesões:\n\nColuna 'Tipo de atendimento' não encontrada."
+
+    df_msg = df_original.copy()
+    tipo_norm = df_msg[col_tipo].astype(str).apply(normalize_text)
+
+    df_adesoes_msg = df_msg[
+        tipo_norm.str.contains("ADESAO REALIZADA", na=False)
+    ].copy()
+
+    if df_adesoes_msg.empty:
+        return "Resultado sobre adesões:\n\nNenhuma adesão realizada encontrada no arquivo enviado."
+
+    total_adesoes = len(df_adesoes_msg)
+
+    col_data = encontrar_coluna(df_adesoes_msg, ["DATA", "REGISTRO"])
+    col_asro = encontrar_coluna(df_adesoes_msg, ["ASRO"])
+    col_novo = encontrar_coluna(df_adesoes_msg, ["NOVO"])
 
     data_texto = "Na data analisada"
 
-    if "Data do registro" in df_final.columns:
+    if col_data:
         datas = pd.to_datetime(
-            df_final["Data do registro"],
+            df_adesoes_msg[col_data],
             errors="coerce",
             dayfirst=True
         )
@@ -222,9 +239,9 @@ def gerar_mensagem_resultado_adesoes(df_final):
 
     novos_clientes = 0
 
-    if "É novo cliente?" in df_final.columns:
+    if col_novo:
         novos_clientes = (
-            df_final["É novo cliente?"]
+            df_adesoes_msg[col_novo]
             .astype(str)
             .str.strip()
             .str.upper()
@@ -238,15 +255,15 @@ def gerar_mensagem_resultado_adesoes(df_final):
         f"sendo {novos_clientes} novos clientes.\n\n"
     )
 
-    if "ASRO" in df_final.columns:
-        for asro, dados_asro in df_final.groupby("ASRO"):
+    if col_asro:
+        for asro, dados_asro in sorted(df_adesoes_msg.groupby(col_asro), key=lambda x: str(x[0])):
             total_asro = len(dados_asro)
 
             novos_asro = 0
 
-            if "É novo cliente?" in dados_asro.columns:
+            if col_novo:
                 novos_asro = (
-                    dados_asro["É novo cliente?"]
+                    dados_asro[col_novo]
                     .astype(str)
                     .str.strip()
                     .str.upper()
@@ -269,43 +286,45 @@ def processar_filtro_adesoes(uploaded_file):
     df = read_excel_any(uploaded_file)
     df.columns = df.columns.astype(str).str.strip()
 
-    if "Tipo de atendimento" in df.columns:
-        df = df[
-            df["Tipo de atendimento"]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-            == "ADESÃO REALIZADA (MORADOR PRESENTE)"
-        ]
+    col_tipo = encontrar_coluna(df, ["TIPO", "ATENDIMENTO"])
+
+    if not col_tipo:
+        raise ValueError("Coluna 'Tipo de atendimento' não encontrada.")
+
+    tipo_norm = df[col_tipo].astype(str).apply(normalize_text)
+
+    df_filtrado = df[
+        tipo_norm.str.contains("ADESAO REALIZADA", na=False)
+    ].copy()
 
     df_final = pd.DataFrame()
 
-    for coluna in df.columns:
+    for coluna in df_filtrado.columns:
         nome = str(coluna).strip().lower()
 
         if "link backoffice" in nome:
-            df_final["Link Backoffice"] = df[coluna]
+            df_final["Link Backoffice"] = df_filtrado[coluna]
 
         elif "code deep" in nome:
-            df_final["Code Deep"] = df[coluna]
+            df_final["Code Deep"] = df_filtrado[coluna]
 
         elif "data do registro" in nome:
-            df_final["Data do registro"] = df[coluna]
+            df_final["Data do registro"] = df_filtrado[coluna]
 
         elif nome == "asro":
-            df_final["ASRO"] = df[coluna]
+            df_final["ASRO"] = df_filtrado[coluna]
 
         elif nome == "nome completo:":
-            df_final["Cliente"] = df[coluna]
+            df_final["Cliente"] = df_filtrado[coluna]
 
         elif nome in ["é novo cliente?", "e novo cliente?"]:
-            df_final["É novo cliente?"] = df[coluna]
+            df_final["É novo cliente?"] = df_filtrado[coluna]
 
         elif nome in ["situação backoffice", "situacao backoffice"]:
-            df_final["Backoffice"] = df[coluna]
+            df_final["Backoffice"] = df_filtrado[coluna]
 
         elif nome == "tipo de atendimento":
-            df_final["Tipo de atendimento"] = df[coluna]
+            df_final["Tipo de atendimento"] = df_filtrado[coluna]
 
     colunas_finais = [
         "Link Backoffice",
@@ -351,7 +370,7 @@ def processar_filtro_adesoes(uploaded_file):
 
     aplicar_bordas_e_larguras(ws)
 
-    mensagem = gerar_mensagem_resultado_adesoes(df_final)
+    mensagem = gerar_mensagem_resultado_adesoes(df, df_final, col_tipo)
 
     return (
         excel_bytes_from_wb(wb),
@@ -472,13 +491,7 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
             cell.border = borda
 
         for i, row in enumerate(dados.itertuples(index=False), start=5):
-            valores = [
-                row[0],
-                row[2],
-                row[1],
-                row[3],
-                row[4]
-            ]
+            valores = [row[0], row[2], row[1], row[3], row[4]]
 
             for col, val in enumerate(valores, start=1):
                 ws.cell(row=i, column=col, value=excel_value(val)).border = borda
@@ -917,7 +930,7 @@ def relatorio_final_simplificado(df_base):
     )
 
 
-def montar_resumo_geral_acompanhamento(df_periodos):
+def montar_resumo_geral_acompanhamento(df_periodos, hora_extracao=None, resumo_operacional=None):
     resumo_asro = (
         df_periodos
         .groupby("ASRO")
@@ -928,7 +941,6 @@ def montar_resumo_geral_acompanhamento(df_periodos):
         .reset_index()
     )
 
-    # ✅ ALTERAÇÃO: média por agente arredondada como inteiro
     resumo_asro["Média por agente"] = resumo_asro.apply(
         lambda r: round(r["Visitas"] / r["Agentes"]) if r["Agentes"] else 0,
         axis=1
@@ -949,7 +961,6 @@ def montar_resumo_geral_acompanhamento(df_periodos):
 
     ranking.insert(0, "RANKING", ranking.index + 1)
 
-    # ✅ ALTERAÇÃO: datas filtradas em formato brasileiro
     datas_formatadas = []
 
     for data in sorted(df_periodos["DATA_REGISTRO_TRATADA"].dropna().unique()):
@@ -958,15 +969,25 @@ def montar_resumo_geral_acompanhamento(df_periodos):
         except Exception:
             datas_formatadas.append(str(data))
 
+    if hora_extracao is None:
+        hora_extracao = datetime.now().strftime("%H:%M:%S")
+
+    if resumo_operacional is None:
+        resumo_operacional = {
+            "total_bruto": len(df_periodos),
+            "validos_periodo": len(df_periodos),
+            "fora_periodo": 0
+        }
+
     return {
         "datas": ", ".join(datas_formatadas),
-
-        # ✅ ALTERAÇÃO: somente hora da extração
-        "extracao": datetime.now().strftime("%H:%M:%S"),
-
+        "extracao": hora_extracao,
         "asros_atuando": df_periodos["ASRO"].nunique(),
         "total_registros": len(df_periodos),
         "total_agentes": df_periodos["AGENTE"].nunique(),
+        "total_bruto": resumo_operacional.get("total_bruto", len(df_periodos)),
+        "validos_periodo": resumo_operacional.get("validos_periodo", len(df_periodos)),
+        "fora_periodo": resumo_operacional.get("fora_periodo", 0),
         "resumo_asro": resumo_asro,
         "ranking": ranking,
     }
@@ -1030,10 +1051,12 @@ def montar_resumo_agente_por_faixa(dados_agente):
     return pd.DataFrame(linhas)
 
 
-def gerar_excel_acompanhamento(df_periodos):
+def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
     from openpyxl.utils import get_column_letter
+
+    hora_extracao = datetime.now().strftime("%H:%M:%S")
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -1086,11 +1109,11 @@ def gerar_excel_acompanhamento(df_periodos):
 
         return row + len(df) + 2
 
-    # =====================================================
-    # ABA GERAL
-    # =====================================================
-
-    geral = montar_resumo_geral_acompanhamento(df_periodos)
+    geral = montar_resumo_geral_acompanhamento(
+        df_periodos,
+        hora_extracao=hora_extracao,
+        resumo_operacional=resumo_operacional
+    )
 
     ws = wb.create_sheet("GERAL")
 
@@ -1104,42 +1127,50 @@ def gerar_excel_acompanhamento(df_periodos):
         "Data(s) filtrada(s)",
         "Horário da extração",
         "ASROs atuando",
-        "Total de registros",
+        "Total bruto exportado",
+        "Registros válidos nos períodos",
+        "Fora dos períodos obrigatórios",
         "Total de agentes"
     ]
 
     valores = [
         geral["datas"],
-        geral["extracao"],
+        hora_extracao,
         geral["asros_atuando"],
-        geral["total_registros"],
+        geral["total_bruto"],
+        geral["validos_periodo"],
+        geral["fora_periodo"],
         geral["total_agentes"]
     ]
 
     for idx, label in enumerate(labels, start=3):
         ws.cell(row=idx, column=1, value=label).font = fonte_negrito
-        ws.cell(row=idx, column=2, value=valores[idx - 3])
 
-    ws.cell(row=9, column=1, value="ASRO").fill = cinza
-    ws.cell(row=9, column=2, value="Visitas").fill = cinza
-    ws.cell(row=9, column=3, value="Média por agente").fill = cinza
+        cell_valor = ws.cell(row=idx, column=2, value=valores[idx - 3])
+
+        if label == "Horário da extração":
+            cell_valor.number_format = "@"
+
+    resumo_start = 12
+
+    ws.cell(row=resumo_start, column=1, value="ASRO").fill = cinza
+    ws.cell(row=resumo_start, column=2, value="Visitas").fill = cinza
+    ws.cell(row=resumo_start, column=3, value="Média por agente").fill = cinza
 
     for c in range(1, 4):
-        ws.cell(row=9, column=c).font = fonte_negrito
-        ws.cell(row=9, column=c).alignment = Alignment(horizontal="center")
+        ws.cell(row=resumo_start, column=c).font = fonte_negrito
+        ws.cell(row=resumo_start, column=c).alignment = Alignment(horizontal="center")
 
-    linha = 10
+    linha = resumo_start + 1
 
     for _, r in geral["resumo_asro"].iterrows():
         ws.cell(row=linha, column=1, value=r["ASRO"])
         ws.cell(row=linha, column=2, value=int(r["Visitas"]))
-
-        # ✅ ALTERAÇÃO: média como inteiro no Excel
         ws.cell(row=linha, column=3, value=int(r["Média por agente"]))
 
         linha += 1
 
-    ranking_start = 9
+    ranking_start = 12
 
     for c, label in zip(
         range(5, 9),
@@ -1160,10 +1191,6 @@ def gerar_excel_acompanhamento(df_periodos):
         linha_rank += 1
 
     estilizar_range(ws)
-
-    # =====================================================
-    # ABAS POR ASRO
-    # =====================================================
 
     for asro, dados_asro in df_periodos.groupby("ASRO"):
         ws_asro = wb.create_sheet(safe_sheet_name(asro))
@@ -1213,10 +1240,6 @@ def gerar_excel_acompanhamento(df_periodos):
             linha += 1
 
         estilizar_range(ws_asro)
-
-    # =====================================================
-    # BASE TRATADA
-    # =====================================================
 
     ws_base = wb.create_sheet("BASE TRATADA")
     ws_base["A1"] = "BASE TRATADA"
@@ -1500,10 +1523,15 @@ with tab_acompanhamento:
         try:
             df_original, df_periodos, cols = preparar_acompanhamento(arquivos)
 
+            df_fora_periodo_total = df_original[
+                ~df_original["PERIODO"].isin(["MANHÃ", "TARDE"])
+            ].copy()
+
             st.success(
                 f"Arquivos carregados: {len(arquivos)} | "
                 f"Registros brutos: {len(df_original)} | "
-                f"Registros válidos nos períodos: {len(df_periodos)}"
+                f"Registros válidos nos períodos: {len(df_periodos)} | "
+                f"Fora dos períodos: {len(df_fora_periodo_total)}"
             )
 
             st.caption(
@@ -1516,6 +1544,23 @@ with tab_acompanhamento:
                     "Nenhum registro encontrado nos horários: "
                     "manhã 10h, 11h, 12h; tarde 15h, 17h, 18h."
                 )
+
+                if not df_fora_periodo_total.empty:
+                    with st.expander("Ver registros fora do período"):
+                        st.dataframe(
+                            df_fora_periodo_total[
+                                [
+                                    "ARQUIVO_ORIGEM",
+                                    "DATA_REGISTRO_TRATADA",
+                                    "HORA_EXTRAIDA",
+                                    "PERIODO",
+                                    "ASRO",
+                                    "AGENTE",
+                                    "TIPO_ORIGINAL"
+                                ]
+                            ],
+                            use_container_width=True
+                        )
 
             else:
                 st.subheader("Filtros")
@@ -1541,10 +1586,48 @@ with tab_acompanhamento:
                     & df_periodos["DATA_REGISTRO_TRATADA"].isin(datas_sel)
                 ].copy()
 
+                df_original_filtrado = df_original[
+                    df_original["ASRO"].isin(asros_sel)
+                    & df_original["DATA_REGISTRO_TRATADA"].isin(datas_sel)
+                ].copy()
+
+                df_fora_periodo_filtrado = df_original_filtrado[
+                    ~df_original_filtrado["PERIODO"].isin(["MANHÃ", "TARDE"])
+                ].copy()
+
                 if df_dash.empty:
                     st.warning("Nenhum dado encontrado com os filtros selecionados.")
 
                 else:
+                    total_bruto = len(df_original_filtrado)
+                    total_validos = len(df_dash)
+                    total_fora = len(df_fora_periodo_filtrado)
+
+                    st.subheader("Validação dos registros")
+
+                    m1, m2, m3 = st.columns(3)
+
+                    m1.metric("Total bruto exportado", total_bruto)
+                    m2.metric("Registros válidos nos períodos", total_validos)
+                    m3.metric("Fora dos períodos obrigatórios", total_fora)
+
+                    if total_fora > 0:
+                        with st.expander("Ver registros fora dos períodos obrigatórios"):
+                            st.dataframe(
+                                df_fora_periodo_filtrado[
+                                    [
+                                        "ARQUIVO_ORIGEM",
+                                        "DATA_REGISTRO_TRATADA",
+                                        "HORA_EXTRAIDA",
+                                        "PERIODO",
+                                        "ASRO",
+                                        "AGENTE",
+                                        "TIPO_ORIGINAL"
+                                    ]
+                                ],
+                                use_container_width=True
+                            )
+
                     total_visitas = len(df_dash)
                     agentes_unicos = df_dash["AGENTE"].nunique()
 
@@ -1554,8 +1637,6 @@ with tab_acompanhamento:
                     k2.metric("Manhã", int((df_dash["PERIODO"] == "MANHÃ").sum()))
                     k3.metric("Tarde", int((df_dash["PERIODO"] == "TARDE").sum()))
                     k4.metric("Total de agentes", agentes_unicos)
-
-                    # ✅ Média no dashboard também arredondada
                     k5.metric(
                         "Média/agente",
                         round(total_visitas / agentes_unicos) if agentes_unicos else 0
@@ -1705,7 +1786,16 @@ with tab_acompanhamento:
                     st.subheader("Gerar arquivo Excel")
 
                     if st.button("Gerar relatório final em Excel", key="btn_excel_acompanhamento"):
-                        excel_data, nome_arquivo = gerar_excel_acompanhamento(df_dash)
+                        resumo_operacional = {
+                            "total_bruto": total_bruto,
+                            "validos_periodo": total_validos,
+                            "fora_periodo": total_fora
+                        }
+
+                        excel_data, nome_arquivo = gerar_excel_acompanhamento(
+                            df_dash,
+                            resumo_operacional=resumo_operacional
+                        )
 
                         st.success("Arquivo Excel gerado com sucesso!")
 
