@@ -94,17 +94,14 @@ def aplicar_bordas_e_larguras(ws, max_width=55):
         for cell in row:
             if isinstance(cell, MergedCell):
                 continue
-
             if cell.value is not None:
                 cell.border = borda
 
     for col_idx, col_cells in enumerate(ws.columns, start=1):
         max_len = 0
-
         for cell in col_cells:
             if isinstance(cell, MergedCell):
                 continue
-
             if cell.value is not None:
                 max_len = max(max_len, len(str(cell.value)))
 
@@ -116,37 +113,44 @@ def aplicar_bordas_e_larguras(ws, max_width=55):
 # =========================================================
 
 def classificar_periodo(hora):
+    """
+    Nova regra:
+    MANHÃ: 07h até 12h
+    TARDE: 13h até 18h
+    FORA DO PERÍODO: demais horários
+
+    Obs.: essa classificação NÃO remove registros.
+    Ela é usada apenas para análise visual.
+    """
     try:
         hora = int(hora)
     except Exception:
         return "FORA DO PERÍODO"
 
-    if hora in [10, 11, 12]:
+    if 7 <= hora <= 12:
         return "MANHÃ"
 
-    if hora in [15, 17, 18]:
+    if 13 <= hora <= 18:
         return "TARDE"
 
     return "FORA DO PERÍODO"
 
 
 def classificar_faixa_horario_excel(hora):
+    """
+    Usado no Excel do acompanhamento.
+    Não exclui registros.
+    """
     try:
         hora = int(hora)
     except Exception:
         return "FORA DO PERÍODO"
 
-    if hora == 10:
-        return "MANHÃ 1"
+    if 7 <= hora <= 12:
+        return "MANHÃ"
 
-    if hora in [11, 12]:
-        return "MANHÃ 2"
-
-    if hora == 15:
-        return "TARDE 1"
-
-    if hora in [17, 18]:
-        return "TARDE 2"
+    if 13 <= hora <= 18:
+        return "TARDE"
 
     return "FORA DO PERÍODO"
 
@@ -179,14 +183,10 @@ def classificar_tipo_atendimento(valor):
 
 
 # =========================================================
-# 1) FILTRO DE ADESÕES
+# FILTRO DE ADESÕES
 # =========================================================
 
 def filtrar_adesoes_realizadas(df, col_tipo):
-    """
-    Filtra todas as linhas onde Tipo de atendimento contém ADESÃO REALIZADA.
-    Essa mesma base é usada para gerar o Excel e a mensagem automática.
-    """
     if not col_tipo:
         return df.iloc[0:0].copy()
 
@@ -196,16 +196,12 @@ def filtrar_adesoes_realizadas(df, col_tipo):
         tipo_norm.str.contains("ADESAO REALIZADA", na=False)
     ].copy()
 
-    # Correção principal: remove índice original para não pular linhas no Excel
     df_filtrado = df_filtrado.reset_index(drop=True)
 
     return df_filtrado
 
 
 def gerar_mensagem_resultado_adesoes(df_adesoes):
-    """
-    Gera mensagem automática com base no mesmo DataFrame que será exportado.
-    """
     if df_adesoes is None or df_adesoes.empty:
         return "Resultado sobre adesões:\n\nNenhuma adesão encontrada no arquivo enviado."
 
@@ -290,7 +286,6 @@ def processar_filtro_adesoes(uploaded_file):
     if not col_tipo:
         raise ValueError("Coluna 'Tipo de atendimento' não encontrada.")
 
-    # Mesma base usada para Excel e mensagem
     df_adesoes = filtrar_adesoes_realizadas(df, col_tipo)
 
     df_final = pd.DataFrame()
@@ -337,10 +332,7 @@ def processar_filtro_adesoes(uploaded_file):
         if col not in df_final.columns:
             df_final[col] = ""
 
-    df_final = df_final[colunas_finais]
-
-    # Correção principal: garante linhas contínuas na exportação
-    df_final = df_final.reset_index(drop=True)
+    df_final = df_final[colunas_finais].reset_index(drop=True)
 
     wb = Workbook()
     ws = wb.active
@@ -363,7 +355,6 @@ def processar_filtro_adesoes(uploaded_file):
         cell.alignment = Alignment(horizontal="center")
         cell.border = borda
 
-    # Correção: usar enumerate em vez do índice original do pandas
     for row_idx, row in enumerate(df_final.itertuples(index=False), start=2):
         for col_id, value in enumerate(row, start=1):
             cell = ws.cell(row=row_idx, column=col_id, value=excel_value(value))
@@ -400,7 +391,7 @@ def processar_filtro_adesoes(uploaded_file):
 
 
 # =========================================================
-# 2) TERMO DE DOAÇÃO
+# TERMO DE DOAÇÃO
 # =========================================================
 
 def processar_termo_doacao(uploaded_file, logo_file=None):
@@ -531,7 +522,7 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
 
 
 # =========================================================
-# 3) RELATÓRIO DE AGENTES
+# RELATÓRIO DE AGENTES
 # =========================================================
 
 def processar_relatorio_agentes(uploaded_file):
@@ -597,13 +588,78 @@ def processar_relatorio_agentes(uploaded_file):
 
 
 # =========================================================
-# 4) RELATÓRIO ENVIO / VISITAS / ADESÕES
+# RELATÓRIO ENVIO / VISITAS / ADESÕES
 # =========================================================
+
+def preparar_base_ultima_visita(df, col_code, col_tipo):
+    df = df.copy()
+
+    df["IMOVEL"] = (
+        df[col_code]
+        .astype(str)
+        .str.split("-")
+        .str[0]
+        .str.strip()
+    )
+
+    ordem = (
+        df[col_code]
+        .astype(str)
+        .str.split("-")
+        .str[1]
+    )
+
+    df["ORDEM_VISITA"] = pd.to_numeric(ordem, errors="coerce").fillna(0).astype(int)
+    df["TIPO_CLASS"] = df[col_tipo].apply(classificar_tipo_atendimento)
+
+    df = df.sort_values(by=["IMOVEL", "ORDEM_VISITA"])
+
+    df_ultima_visita = df.drop_duplicates(
+        subset=["IMOVEL"],
+        keep="last"
+    ).copy()
+
+    return df, df_ultima_visita
+
+
+def calcular_metricas_envio(base_visitas, base_ultima_visita, col_data):
+    visitas_totais = len(base_visitas)
+
+    imoveis_visitados = base_visitas["IMOVEL"].nunique()
+
+    dias = base_visitas[col_data].dropna().nunique()
+
+    media = round(visitas_totais / dias) if dias else 0
+
+    adesoes = int((base_ultima_visita["TIPO_CLASS"] == "ADESÕES").sum())
+    ausentes = int((base_ultima_visita["TIPO_CLASS"] == "AUSENTES").sum())
+    recusas = int((base_ultima_visita["TIPO_CLASS"] == "RECUSAS").sum())
+    agendamentos = int((base_ultima_visita["TIPO_CLASS"] == "AGENDAMENTOS").sum())
+
+    def pct(valor):
+        return valor / imoveis_visitados if imoveis_visitados else 0
+
+    return {
+        "Visitas totais": visitas_totais,
+        "Imóveis visitados": imoveis_visitados,
+        "Média visitas diárias": media,
+        "Dias trabalhados": dias,
+        "Moradores ausentes": ausentes,
+        "% Moradores ausentes": pct(ausentes),
+        "Adesões": adesoes,
+        "% Adesões": pct(adesoes),
+        "Recusas": recusas,
+        "% Recusas": pct(recusas),
+        "Agendamentos": agendamentos,
+        "% Agendamentos": pct(agendamentos),
+    }
+
 
 def processar_relatorio_envio_visitas_adesoes(uploaded_file):
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.chart import BarChart, Reference
+    from openpyxl.chart.label import DataLabelList
 
     df = read_excel_any(uploaded_file)
     df.columns = df.columns.astype(str).str.strip()
@@ -612,6 +668,7 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
     col_tipo = encontrar_coluna(df, ["TIPO", "ATENDIMENTO"])
     col_agente = encontrar_coluna(df, ["NOME", "AGENTE"])
     col_data = encontrar_coluna(df, ["DATA", "REGISTRO"]) or encontrar_coluna(df, ["DATA"])
+    col_code = encontrar_coluna(df, ["CODE"])
 
     faltando = []
 
@@ -627,26 +684,15 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
     if not col_data:
         faltando.append("Data do registro")
 
+    if not col_code:
+        faltando.append("Code Deep")
+
     if faltando:
         raise ValueError("Colunas obrigatórias não encontradas: " + ", ".join(faltando))
 
     df[col_data] = pd.to_datetime(df[col_data], errors="coerce").dt.date
-    df["TIPO_CLASS"] = df[col_tipo].apply(classificar_tipo_atendimento)
 
-    def metricas(base):
-        total = len(base)
-        dias = base[col_data].dropna().nunique()
-
-        return {
-            "Visitas totais": total,
-            "Imóveis visitados": total,
-            "Média visitas diárias": round(total / dias) if dias else 0,
-            "Dias trabalhados": dias,
-            "Moradores ausentes": int((base["TIPO_CLASS"] == "AUSENTES").sum()),
-            "Adesões": int((base["TIPO_CLASS"] == "ADESÕES").sum()),
-            "Recusas": int((base["TIPO_CLASS"] == "RECUSAS").sum()),
-            "Agendamentos": int((base["TIPO_CLASS"] == "AGENDAMENTOS").sum()),
-        }
+    df_base, df_ultima = preparar_base_ultima_visita(df, col_code, col_tipo)
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -662,17 +708,28 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
         bottom=Side(style="thin")
     )
 
-    def criar_resumo(ws, titulo, base):
-        m = metricas(base)
+    def criar_resumo(ws, titulo, base_visitas, base_ultima_visita):
+        m = calcular_metricas_envio(base_visitas, base_ultima_visita, col_data)
 
         ws.append([titulo])
         ws.append([])
-        ws.append(["Indicador", "Valor"])
+        ws.append(["Indicador", "Valor", "Percentual"])
 
-        for k, v in m.items():
-            ws.append([k, v])
+        linhas = [
+            ("Visitas totais", m["Visitas totais"], ""),
+            ("Imóveis visitados", m["Imóveis visitados"], ""),
+            ("Média visitas diárias", m["Média visitas diárias"], ""),
+            ("Dias trabalhados", m["Dias trabalhados"], ""),
+            ("Moradores ausentes", m["Moradores ausentes"], m["% Moradores ausentes"]),
+            ("Adesões", m["Adesões"], m["% Adesões"]),
+            ("Recusas", m["Recusas"], m["% Recusas"]),
+            ("Agendamentos", m["Agendamentos"], m["% Agendamentos"]),
+        ]
 
-        ws.merge_cells("A1:B1")
+        for item in linhas:
+            ws.append(list(item))
+
+        ws.merge_cells("A1:C1")
         ws["A1"].fill = verde
         ws["A1"].font = branco
         ws["A1"].alignment = Alignment(horizontal="center")
@@ -682,28 +739,36 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
             cell.font = branco
             cell.alignment = Alignment(horizontal="center")
 
+        for row in range(8, 12):
+            ws.cell(row=row, column=3).number_format = "0.00%"
+
         for row in ws.iter_rows():
             for cell in row:
                 if cell.value is not None:
                     cell.border = borda
 
-        inicio = 13
+        inicio = 14
+
+        dados_grafico = pd.DataFrame([
+            ["Adesões", m["Adesões"]],
+            ["Moradores ausentes", m["Moradores ausentes"]],
+            ["Recusas", m["Recusas"]],
+            ["Agendamentos", m["Agendamentos"]],
+        ], columns=["Indicador", "Total"])
+
+        dados_grafico = dados_grafico.sort_values("Total", ascending=False)
+
         ws.cell(row=inicio, column=1, value="Indicador")
         ws.cell(row=inicio, column=2, value="Total")
 
-        dados = [
-            ("Adesões", m["Adesões"]),
-            ("Moradores ausentes", m["Moradores ausentes"]),
-            ("Recusas", m["Recusas"]),
-            ("Agendamentos", m["Agendamentos"])
-        ]
-
-        for idx, (ind, val) in enumerate(dados, start=inicio + 1):
-            ws.cell(row=idx, column=1, value=ind)
-            ws.cell(row=idx, column=2, value=val)
+        for idx, linha in enumerate(dados_grafico.itertuples(index=False), start=inicio + 1):
+            ws.cell(row=idx, column=1, value=linha[0])
+            ws.cell(row=idx, column=2, value=int(linha[1]))
 
         chart = BarChart()
         chart.title = titulo
+        chart.y_axis.title = "Quantidade"
+        chart.x_axis.title = "Indicadores"
 
         data_ref = Reference(ws, min_col=2, min_row=inicio, max_row=inicio + 4)
         cats_ref = Reference(ws, min_col=1, min_row=inicio + 1, max_row=inicio + 4)
@@ -711,16 +776,33 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
         chart.add_data(data_ref, titles_from_data=True)
         chart.set_categories(cats_ref)
 
+        chart.dLbls = DataLabelList()
+        chart.dLbls.showVal = True
+
         ws.add_chart(chart, "E3")
 
         aplicar_bordas_e_larguras(ws)
 
     ws_geral = wb.create_sheet("GERAL")
-    criar_resumo(ws_geral, "RELATÓRIO DE ADESÕES, VISITAS E ÁREAS CORRELATAS", df)
+    criar_resumo(
+        ws_geral,
+        "RELATÓRIO DE ADESÕES, VISITAS E ÁREAS CORRELATAS",
+        df_base,
+        df_ultima
+    )
 
-    for asro, dados_asro in sorted(df.groupby(col_asro), key=lambda x: str(x[0])):
+    for asro, dados_asro in sorted(df_base.groupby(col_asro), key=lambda x: str(x[0])):
         ws = wb.create_sheet(safe_sheet_name(asro))
-        criar_resumo(ws, f"RELATÓRIO - {asro}", dados_asro)
+
+        imoveis_asro = dados_asro["IMOVEL"].unique()
+        ultima_asro = df_ultima[df_ultima["IMOVEL"].isin(imoveis_asro)].copy()
+
+        criar_resumo(
+            ws,
+            f"RELATÓRIO - {asro}",
+            dados_asro,
+            ultima_asro
+        )
 
         linha = 22
 
@@ -729,9 +811,13 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
             "Visitas totais",
             "Imóveis visitados",
             "Adesões",
+            "% Adesões",
             "Ausentes",
+            "% Ausentes",
             "Recusas",
-            "Agendamentos"
+            "% Recusas",
+            "Agendamentos",
+            "% Agendamentos"
         ]
 
         for c, h in enumerate(headers, start=1):
@@ -740,20 +826,29 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
         linha += 1
 
         for agente, dados_agente in dados_asro.groupby(col_agente):
-            ma = metricas(dados_agente)
+            imoveis_agente = dados_agente["IMOVEL"].unique()
+            ultima_agente = ultima_asro[ultima_asro["IMOVEL"].isin(imoveis_agente)].copy()
+
+            ma = calcular_metricas_envio(dados_agente, ultima_agente, col_data)
 
             valores = [
                 excel_value(agente),
                 ma["Visitas totais"],
                 ma["Imóveis visitados"],
                 ma["Adesões"],
+                ma["% Adesões"],
                 ma["Moradores ausentes"],
+                ma["% Moradores ausentes"],
                 ma["Recusas"],
-                ma["Agendamentos"]
+                ma["% Recusas"],
+                ma["Agendamentos"],
+                ma["% Agendamentos"]
             ]
 
             for c, v in enumerate(valores, start=1):
-                ws.cell(row=linha, column=c, value=excel_value(v))
+                cell = ws.cell(row=linha, column=c, value=excel_value(v))
+                if c in [5, 7, 9, 11]:
+                    cell.number_format = "0.00%"
 
             linha += 1
 
@@ -766,7 +861,7 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
 
 
 # =========================================================
-# 5) ACOMPANHAMENTO DIÁRIO
+# ACOMPANHAMENTO DIÁRIO
 # =========================================================
 
 def preparar_acompanhamento(arquivos):
@@ -814,20 +909,20 @@ def preparar_acompanhamento(arquivos):
     horario_str = df[col_horario].astype(str).str.strip()
 
     hora_dt = pd.to_datetime(horario_str, errors="coerce").dt.hour
+
     hora_num = pd.to_numeric(
         horario_str.str.extract(r"(\d{1,2})", expand=False),
         errors="coerce"
     )
 
     df["HORA_EXTRAIDA"] = hora_dt.fillna(hora_num).astype("Int64")
+
     df["PERIODO"] = df["HORA_EXTRAIDA"].apply(classificar_periodo)
 
     df["ASRO"] = df[col_asro].astype(str).str.strip()
     df["AGENTE"] = df[col_agente].astype(str).str.strip()
     df["TIPO_ORIGINAL"] = df[col_tipo].astype(str).str.strip()
     df["TIPO_CLASS"] = df[col_tipo].apply(classificar_tipo_atendimento)
-
-    df_periodos = df[df["PERIODO"].isin(["MANHÃ", "TARDE"])].copy()
 
     cols = {
         "ASRO": col_asro,
@@ -837,7 +932,7 @@ def preparar_acompanhamento(arquivos):
         "Tipo de atendimento": col_tipo
     }
 
-    return df, df_periodos, cols
+    return df, cols
 
 
 def resumo_agente_acomp(base, incluir_asro=True):
@@ -950,9 +1045,9 @@ def relatorio_final_simplificado(df_base):
     )
 
 
-def montar_resumo_geral_acompanhamento(df_periodos, hora_extracao=None, resumo_operacional=None):
+def montar_resumo_geral_acompanhamento(df_base, hora_extracao=None):
     resumo_asro = (
-        df_periodos
+        df_base
         .groupby("ASRO")
         .agg(
             Visitas=("AGENTE", "size"),
@@ -971,7 +1066,7 @@ def montar_resumo_geral_acompanhamento(df_periodos, hora_extracao=None, resumo_o
     ].sort_values("Visitas", ascending=False)
 
     ranking = (
-        df_periodos
+        df_base
         .groupby(["AGENTE", "ASRO"])
         .size()
         .reset_index(name="Visitas")
@@ -983,7 +1078,7 @@ def montar_resumo_geral_acompanhamento(df_periodos, hora_extracao=None, resumo_o
 
     datas_formatadas = []
 
-    for data in sorted(df_periodos["DATA_REGISTRO_TRATADA"].dropna().unique()):
+    for data in sorted(df_base["DATA_REGISTRO_TRATADA"].dropna().unique()):
         try:
             datas_formatadas.append(pd.to_datetime(data).strftime("%d/%m/%Y"))
         except Exception:
@@ -992,22 +1087,12 @@ def montar_resumo_geral_acompanhamento(df_periodos, hora_extracao=None, resumo_o
     if hora_extracao is None:
         hora_extracao = datetime.now().strftime("%H:%M:%S")
 
-    if resumo_operacional is None:
-        resumo_operacional = {
-            "total_bruto": len(df_periodos),
-            "validos_periodo": len(df_periodos),
-            "fora_periodo": 0
-        }
-
     return {
         "datas": ", ".join(datas_formatadas),
         "extracao": hora_extracao,
-        "asros_atuando": df_periodos["ASRO"].nunique(),
-        "total_registros": len(df_periodos),
-        "total_agentes": df_periodos["AGENTE"].nunique(),
-        "total_bruto": resumo_operacional.get("total_bruto", len(df_periodos)),
-        "validos_periodo": resumo_operacional.get("validos_periodo", len(df_periodos)),
-        "fora_periodo": resumo_operacional.get("fora_periodo", 0),
+        "asros_atuando": df_base["ASRO"].nunique(),
+        "total_registros": len(df_base),
+        "total_agentes": df_base["AGENTE"].nunique(),
         "resumo_asro": resumo_asro,
         "ranking": ranking,
     }
@@ -1032,7 +1117,7 @@ def montar_resumo_agente_por_faixa(dados_agente):
 
     linhas = []
 
-    for faixa in ["MANHÃ 1", "MANHÃ 2", "TARDE 1", "TARDE 2"]:
+    for faixa in ["MANHÃ", "TARDE", "FORA DO PERÍODO"]:
         bloco = dados_agente[dados_agente["FAIXA_EXCEL"] == faixa]
 
         if bloco.empty:
@@ -1071,7 +1156,7 @@ def montar_resumo_agente_por_faixa(dados_agente):
     return pd.DataFrame(linhas)
 
 
-def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
+def gerar_excel_acompanhamento(df_base):
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
     from openpyxl.utils import get_column_letter
@@ -1130,9 +1215,8 @@ def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
         return row + len(df) + 2
 
     geral = montar_resumo_geral_acompanhamento(
-        df_periodos,
-        hora_extracao=hora_extracao,
-        resumo_operacional=resumo_operacional
+        df_base,
+        hora_extracao=hora_extracao
     )
 
     ws = wb.create_sheet("GERAL")
@@ -1147,9 +1231,7 @@ def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
         "Data(s) filtrada(s)",
         "Horário da extração",
         "ASROs atuando",
-        "Total bruto exportado",
-        "Registros válidos nos períodos",
-        "Fora dos períodos obrigatórios",
+        "Total de registros",
         "Total de agentes"
     ]
 
@@ -1157,21 +1239,18 @@ def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
         geral["datas"],
         hora_extracao,
         geral["asros_atuando"],
-        geral["total_bruto"],
-        geral["validos_periodo"],
-        geral["fora_periodo"],
+        geral["total_registros"],
         geral["total_agentes"]
     ]
 
     for idx, label in enumerate(labels, start=3):
         ws.cell(row=idx, column=1, value=label).font = fonte_negrito
-
         cell_valor = ws.cell(row=idx, column=2, value=valores[idx - 3])
 
         if label == "Horário da extração":
             cell_valor.number_format = "@"
 
-    resumo_start = 12
+    resumo_start = 10
 
     ws.cell(row=resumo_start, column=1, value="ASRO").fill = cinza
     ws.cell(row=resumo_start, column=2, value="Visitas").fill = cinza
@@ -1189,7 +1268,7 @@ def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
         ws.cell(row=linha, column=3, value=int(r["Média por agente"]))
         linha += 1
 
-    ranking_start = 12
+    ranking_start = 10
 
     for c, label in zip(
         range(5, 9),
@@ -1210,7 +1289,7 @@ def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
 
     estilizar_range(ws)
 
-    for asro, dados_asro in df_periodos.groupby("ASRO"):
+    for asro, dados_asro in df_base.groupby("ASRO"):
         ws_asro = wb.create_sheet(safe_sheet_name(asro))
 
         ws_asro.merge_cells("A1:G1")
@@ -1227,7 +1306,7 @@ def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
         ws_asro.cell(
             row=6,
             column=1,
-            value="* MANHÃ 1 - 10H | MANHÃ 2 - 11H/12H | TARDE 1 - 15H | TARDE 2 - 17H/18H"
+            value="* MANHÃ - 07H ÀS 12H | TARDE - 13H ÀS 18H | FORA DO PERÍODO"
         )
 
         ws_asro.cell(row=6, column=1).font = fonte_negrito
@@ -1263,7 +1342,7 @@ def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
     ws_base["A1"].fill = verde
     ws_base["A1"].font = fonte_titulo
 
-    base_export = df_periodos[
+    base_export = df_base[
         [
             "ARQUIVO_ORIGEM",
             "DATA_REGISTRO_TRATADA",
@@ -1303,7 +1382,7 @@ tab_filtro, tab_termo, tab_agentes, tab_envio, tab_acompanhamento = st.tabs([
 
 
 # =========================================================
-# ABA 1 - FILTRO DE ADESÕES
+# ABA FILTRO DE ADESÕES
 # =========================================================
 
 with tab_filtro:
@@ -1316,8 +1395,6 @@ with tab_filtro:
 
         O sistema filtra apenas as adesões realizadas, organiza as informações principais do cliente
         e gera um Excel padronizado para que o time de conferência possa validar os cadastros.
-
-        Após aprovação, os dados são anexados na planilha `sandbox_diario.xlsx`.
 
         Também é gerada automaticamente uma mensagem resumo para envio ao coordenador Caio,
         contendo o total de adesões, novos clientes e separação por ASRO.
@@ -1363,7 +1440,7 @@ with tab_filtro:
 
 
 # =========================================================
-# ABA 2 - TERMO DE DOAÇÃO
+# ABA TERMO DE DOAÇÃO
 # =========================================================
 
 with tab_termo:
@@ -1378,10 +1455,6 @@ with tab_termo:
         geralmente no período de terça-feira passada até a segunda-feira atual.
 
         O arquivo gerado deve ser enviado ao Caio.
-
-        **Mensagem operacional:**  
-        "Relação dos registros de novos clientes da semana anterior
-        (terça passada a segunda atual), enviar ao Caio."
         """
     )
 
@@ -1415,7 +1488,7 @@ with tab_termo:
 
 
 # =========================================================
-# ABA 3 - RELATÓRIO DE AGENTES
+# ABA RELATÓRIO DE AGENTES
 # =========================================================
 
 with tab_agentes:
@@ -1427,10 +1500,6 @@ with tab_agentes:
         Sistema utilizado para extrair o arquivo bruto e gerar um Excel com a produtividade dos agentes.
 
         O relatório organiza a produção por ASRO, agente e tipo de atendimento.
-
-        **Rotina operacional:**  
-        "Relatório semanal dos agentes - produtividade de cada ASRO por agente
-        e tipo de atendimento na semana, enviar ao Wander na sexta-feira no final do dia."
         """
     )
 
@@ -1458,11 +1527,21 @@ with tab_agentes:
 
 
 # =========================================================
-# ABA 4 - RELATÓRIO ENVIO / VISITAS / ADESÕES
+# ABA RELATÓRIO ENVIO / VISITAS / ADESÕES
 # =========================================================
 
 with tab_envio:
     st.header("Relatório Envio / Visitas / Adesões")
+
+    st.info(
+        """
+        **Regra aplicada:**  
+        - Visitas totais = total de linhas da planilha.  
+        - Imóveis visitados = contagem distinta de Code Deep sem o número após o traço.  
+        - Adesões, ausentes, recusas e agendamentos são calculados pela última visita do imóvel.  
+        - Percentuais usam como base o total de imóveis visitados.
+        """
+    )
 
     arquivo = st.file_uploader(
         "Selecione o Excel bruto",
@@ -1488,7 +1567,7 @@ with tab_envio:
 
 
 # =========================================================
-# ABA 5 - ACOMPANHAMENTO DIÁRIO
+# ABA ACOMPANHAMENTO DIÁRIO
 # =========================================================
 
 with tab_acompanhamento:
@@ -1497,35 +1576,25 @@ with tab_acompanhamento:
     st.info(
         """
         **Objetivo da rotina:**  
-        Sistema usado para acompanhar diariamente a produtividade da operação em campo.
+        Sistema usado para acompanhar diariamente a produtividade total da operação em campo.
 
-        Acompanhamos os dados por períodos de sincronização para verificar a produção
-        e identificar baixa produtividade.
+        O acompanhamento considera todos os registros do dia selecionado,
+        independentemente do horário de sincronização.
 
-        **Mensagem padrão para a Gislane:**  
+        **Períodos usados para análise visual:**  
+        - MANHÃ: 07h às 12h  
+        - TARDE: 13h às 18h  
+        - FORA DO PERÍODO: demais horários  
 
-        Boa tarde Gislane, passa para o pessoal, por favor, os horários obrigatórios para sincronizarem os dados:
+        **Observação de sincronização:**  
+        Os horários obrigatórios para sincronizarem os dados são:
 
-        - 10h
-        - 12h antes do almoço
-        - 15h
-        - 18h final do dia, antes do celular bloquear
+        - 10h  
+        - 12h antes do almoço  
+        - 15h  
+        - 18h final do dia, antes do celular bloquear  
 
-        **Uso operacional:**  
-        "Acompanhamento diário - produtividade a cada período de sincronização,
-        verificar e analisar a produção com o pessoal do campo,
-        verificar baixa produtividade."
-
-        **Atenção sobre letras por ASRO:**  
-        Caso agentes peçam para subir letras por ASRO, acessar a pasta:
-
-        `PROJETOS - base_em_branco - Todos os Documentos`
-
-        Depois anexar conforme a solicitação no sistema DEEP:
-
-        `programação -> base de dado -> importar excel`
-
-        Ao finalizar, alinhar os nomes e confirmar o total de registros.
+        Esses horários são referência operacional, mas o sistema não exclui registros fora desses horários.
         """
     )
 
@@ -1538,17 +1607,11 @@ with tab_acompanhamento:
 
     if arquivos:
         try:
-            df_original, df_periodos, cols = preparar_acompanhamento(arquivos)
-
-            df_fora_periodo_total = df_original[
-                ~df_original["PERIODO"].isin(["MANHÃ", "TARDE"])
-            ].copy()
+            df_original, cols = preparar_acompanhamento(arquivos)
 
             st.success(
                 f"Arquivos carregados: {len(arquivos)} | "
-                f"Registros brutos: {len(df_original)} | "
-                f"Registros válidos nos períodos: {len(df_periodos)} | "
-                f"Fora dos períodos: {len(df_fora_periodo_total)}"
+                f"Total de registros: {len(df_original)}"
             )
 
             st.caption(
@@ -1556,208 +1619,170 @@ with tab_acompanhamento:
                 + " | ".join([f"{k}: {v}" for k, v in cols.items()])
             )
 
-            if df_periodos.empty:
-                st.warning(
-                    "Nenhum registro encontrado nos horários: "
-                    "manhã 10h, 11h, 12h; tarde 15h, 17h, 18h."
+            st.subheader("Filtros")
+
+            f1, f2 = st.columns(2)
+
+            asros = sorted(
+                df_original["ASRO"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+
+            datas = sorted(
+                df_original["DATA_REGISTRO_TRATADA"]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+
+            with f1:
+                asros_sel = st.multiselect(
+                    "ASRO",
+                    asros,
+                    default=asros
                 )
 
-                if not df_fora_periodo_total.empty:
-                    with st.expander("Ver registros fora do período"):
-                        st.dataframe(
-                            df_fora_periodo_total[
-                                [
-                                    "ARQUIVO_ORIGEM",
-                                    "DATA_REGISTRO_TRATADA",
-                                    "HORA_EXTRAIDA",
-                                    "PERIODO",
-                                    "ASRO",
-                                    "AGENTE",
-                                    "TIPO_ORIGINAL"
-                                ]
-                            ],
-                            use_container_width=True
-                        )
+            with f2:
+                datas_sel = st.multiselect(
+                    "Data",
+                    datas,
+                    default=datas
+                )
+
+            df_dash = df_original[
+                df_original["ASRO"].isin(asros_sel)
+                & df_original["DATA_REGISTRO_TRATADA"].isin(datas_sel)
+            ].copy()
+
+            if df_dash.empty:
+                st.warning("Nenhum dado encontrado com os filtros selecionados.")
 
             else:
-                st.subheader("Filtros")
+                total_visitas = len(df_dash)
+                agentes_unicos = df_dash["AGENTE"].nunique()
 
-                f1, f2, f3 = st.columns(3)
+                total_manha = int((df_dash["PERIODO"] == "MANHÃ").sum())
+                total_tarde = int((df_dash["PERIODO"] == "TARDE").sum())
+                total_fora = int((df_dash["PERIODO"] == "FORA DO PERÍODO").sum())
 
-                asros = sorted(df_periodos["ASRO"].dropna().astype(str).unique().tolist())
-                periodos = sorted(df_periodos["PERIODO"].dropna().astype(str).unique().tolist())
-                datas = sorted(df_periodos["DATA_REGISTRO_TRATADA"].dropna().unique().tolist())
+                k1, k2, k3, k4, k5 = st.columns(5)
 
-                with f1:
-                    asros_sel = st.multiselect("ASRO", asros, default=asros)
+                k1.metric("Total de registros", total_visitas)
+                k2.metric("Manhã", total_manha)
+                k3.metric("Tarde", total_tarde)
+                k4.metric("Fora do período", total_fora)
+                k5.metric(
+                    "Média/agente",
+                    round(total_visitas / agentes_unicos) if agentes_unicos else 0
+                )
 
-                with f2:
-                    periodos_sel = st.multiselect("Período", periodos, default=periodos)
+                st.subheader("Painel")
 
-                with f3:
-                    datas_sel = st.multiselect("Data", datas, default=datas)
+                col_pizza, col_top = st.columns([1.25, 2])
 
-                df_dash = df_periodos[
-                    df_periodos["ASRO"].isin(asros_sel)
-                    & df_periodos["PERIODO"].isin(periodos_sel)
-                    & df_periodos["DATA_REGISTRO_TRATADA"].isin(datas_sel)
-                ].copy()
+                with col_pizza:
+                    st.markdown("**Distribuição por período**")
 
-                df_original_filtrado = df_original[
-                    df_original["ASRO"].isin(asros_sel)
-                    & df_original["DATA_REGISTRO_TRATADA"].isin(datas_sel)
-                ].copy()
-
-                df_fora_periodo_filtrado = df_original_filtrado[
-                    ~df_original_filtrado["PERIODO"].isin(["MANHÃ", "TARDE"])
-                ].copy()
-
-                if df_dash.empty:
-                    st.warning("Nenhum dado encontrado com os filtros selecionados.")
-
-                else:
-                    total_bruto = len(df_original_filtrado)
-                    total_validos = len(df_dash)
-                    total_fora = len(df_fora_periodo_filtrado)
-
-                    st.subheader("Validação dos registros")
-
-                    m1, m2, m3 = st.columns(3)
-
-                    m1.metric("Total bruto exportado", total_bruto)
-                    m2.metric("Registros válidos nos períodos", total_validos)
-                    m3.metric("Fora dos períodos obrigatórios", total_fora)
-
-                    if total_fora > 0:
-                        with st.expander("Ver registros fora dos períodos obrigatórios"):
-                            st.dataframe(
-                                df_fora_periodo_filtrado[
-                                    [
-                                        "ARQUIVO_ORIGEM",
-                                        "DATA_REGISTRO_TRATADA",
-                                        "HORA_EXTRAIDA",
-                                        "PERIODO",
-                                        "ASRO",
-                                        "AGENTE",
-                                        "TIPO_ORIGINAL"
-                                    ]
-                                ],
-                                use_container_width=True
-                            )
-
-                    total_visitas = len(df_dash)
-                    agentes_unicos = df_dash["AGENTE"].nunique()
-
-                    k1, k2, k3, k4, k5 = st.columns(5)
-
-                    k1.metric("Total de visitas", total_visitas)
-                    k2.metric("Manhã", int((df_dash["PERIODO"] == "MANHÃ").sum()))
-                    k3.metric("Tarde", int((df_dash["PERIODO"] == "TARDE").sum()))
-                    k4.metric("Total de agentes", agentes_unicos)
-                    k5.metric(
-                        "Média/agente",
-                        round(total_visitas / agentes_unicos) if agentes_unicos else 0
+                    periodo = (
+                        df_dash
+                        .groupby("PERIODO")
+                        .size()
+                        .reset_index(name="TOTAL")
                     )
 
-                    st.subheader("Painel")
+                    fig_pie = px.pie(
+                        periodo,
+                        names="PERIODO",
+                        values="TOTAL",
+                        hole=0.35,
+                        color_discrete_sequence=[
+                            "#38bdf8",
+                            "#22c55e",
+                            "#94a3b8"
+                        ]
+                    )
 
-                    col_pizza, col_top = st.columns([1.25, 2])
+                    fig_pie.update_traces(
+                        textposition="inside",
+                        textinfo="percent+label+value"
+                    )
 
-                    with col_pizza:
-                        st.markdown("**Distribuição por período**")
+                    fig_pie.update_layout(
+                        height=430,
+                        margin=dict(l=10, r=10, t=40, b=10),
+                        showlegend=True
+                    )
 
-                        periodo = (
-                            df_dash
-                            .groupby("PERIODO")
-                            .size()
-                            .reset_index(name="TOTAL")
-                        )
+                    st.plotly_chart(fig_pie, use_container_width=True)
 
-                        fig_pie = px.pie(
-                            periodo,
-                            names="PERIODO",
-                            values="TOTAL",
-                            hole=0.35,
-                            color_discrete_sequence=["#38bdf8", "#22c55e", "#93c5fd"]
-                        )
+                with col_top:
+                    st.markdown("**Top agentes por visitas**")
 
-                        fig_pie.update_traces(
-                            textposition="inside",
-                            textinfo="percent+label+value"
-                        )
+                    top_agentes = resumo_agente_acomp(
+                        df_dash,
+                        incluir_asro=True
+                    ).head(15)
 
-                        fig_pie.update_layout(
-                            height=430,
-                            margin=dict(l=10, r=10, t=40, b=10),
-                            showlegend=True
-                        )
+                    fig_bar = px.bar(
+                        top_agentes,
+                        x="Visitas totais",
+                        y="Agente",
+                        color="ASRO",
+                        orientation="h",
+                        text="Visitas totais"
+                    )
 
-                        st.plotly_chart(fig_pie, use_container_width=True)
+                    fig_bar.update_layout(
+                        height=430,
+                        yaxis={"categoryorder": "total ascending"}
+                    )
 
-                    with col_top:
-                        st.markdown("**Top agentes por visitas**")
+                    st.plotly_chart(fig_bar, use_container_width=True)
 
-                        top_agentes = resumo_agente_acomp(
-                            df_dash,
-                            incluir_asro=True
-                        ).head(15)
+                st.subheader("Divisão por período, ASRO e agente")
 
-                        fig_bar = px.bar(
-                            top_agentes,
-                            x="Visitas totais",
-                            y="Agente",
-                            color="ASRO",
-                            orientation="h",
-                            text="Visitas totais"
-                        )
+                for periodo_nome in ["MANHÃ", "TARDE", "FORA DO PERÍODO"]:
+                    dados_periodo = df_dash[df_dash["PERIODO"] == periodo_nome]
 
-                        fig_bar.update_layout(
-                            height=430,
-                            yaxis={"categoryorder": "total ascending"}
-                        )
+                    st.markdown(f"### {periodo_nome}")
 
-                        st.plotly_chart(fig_bar, use_container_width=True)
+                    if dados_periodo.empty:
+                        st.info("Sem registros nesse período.")
+                        continue
 
-                    st.subheader("Divisão por período, ASRO e agente")
+                    for asro_nome in sorted(
+                        dados_periodo["ASRO"]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    ):
+                        dados_asro_periodo = dados_periodo[
+                            dados_periodo["ASRO"] == asro_nome
+                        ]
 
-                    for periodo_nome in ["MANHÃ", "TARDE"]:
-                        dados_periodo = df_dash[df_dash["PERIODO"] == periodo_nome]
-
-                        st.markdown(f"### {periodo_nome}")
-
-                        if dados_periodo.empty:
-                            st.info("Sem registros nesse período.")
-                            continue
-
-                        for asro_nome in sorted(
-                            dados_periodo["ASRO"]
-                            .dropna()
-                            .astype(str)
-                            .unique()
-                            .tolist()
+                        with st.expander(
+                            f"ASRO {asro_nome} - {periodo_nome}",
+                            expanded=True
                         ):
-                            dados_asro_periodo = dados_periodo[
-                                dados_periodo["ASRO"] == asro_nome
-                            ]
+                            heat = (
+                                dados_asro_periodo
+                                .groupby(["AGENTE", "HORA_EXTRAIDA"])
+                                .size()
+                                .reset_index(name="VISITAS")
+                            )
 
-                            with st.expander(
-                                f"ASRO {asro_nome} - {periodo_nome}",
-                                expanded=True
-                            ):
-                                heat = (
-                                    dados_asro_periodo
-                                    .groupby(["AGENTE", "HORA_EXTRAIDA"])
-                                    .size()
-                                    .reset_index(name="VISITAS")
-                                )
+                            pivot = heat.pivot_table(
+                                index="AGENTE",
+                                columns="HORA_EXTRAIDA",
+                                values="VISITAS",
+                                fill_value=0
+                            )
 
-                                pivot = heat.pivot_table(
-                                    index="AGENTE",
-                                    columns="HORA_EXTRAIDA",
-                                    values="VISITAS",
-                                    fill_value=0
-                                )
-
+                            if not pivot.empty:
                                 pivot = pivot.reindex(sorted(pivot.columns), axis=1)
 
                                 fig_heat = px.imshow(
@@ -1785,43 +1810,34 @@ with tab_acompanhamento:
 
                                 st.plotly_chart(fig_heat, use_container_width=True)
 
-                                st.dataframe(
-                                    resumo_agente_acomp(
-                                        dados_asro_periodo,
-                                        incluir_asro=False
-                                    ),
-                                    use_container_width=True
-                                )
+                            st.dataframe(
+                                resumo_agente_acomp(
+                                    dados_asro_periodo,
+                                    incluir_asro=False
+                                ),
+                                use_container_width=True
+                            )
 
-                    st.subheader("Relatório final detalhado")
+                st.subheader("Relatório final detalhado")
 
-                    st.dataframe(
-                        relatorio_final_simplificado(df_dash),
-                        use_container_width=True
+                st.dataframe(
+                    relatorio_final_simplificado(df_dash),
+                    use_container_width=True
+                )
+
+                st.subheader("Gerar arquivo Excel")
+
+                if st.button("Gerar relatório final em Excel", key="btn_excel_acompanhamento"):
+                    excel_data, nome_arquivo = gerar_excel_acompanhamento(df_dash)
+
+                    st.success("Arquivo Excel gerado com sucesso!")
+
+                    st.download_button(
+                        "Baixar Excel do acompanhamento diário",
+                        data=excel_data,
+                        file_name=nome_arquivo,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-
-                    st.subheader("Gerar arquivo Excel")
-
-                    if st.button("Gerar relatório final em Excel", key="btn_excel_acompanhamento"):
-                        resumo_operacional = {
-                            "total_bruto": total_bruto,
-                            "validos_periodo": total_validos,
-                            "fora_periodo": total_fora
-                        }
-
-                        excel_data, nome_arquivo = gerar_excel_acompanhamento(
-                            df_dash,
-                            resumo_operacional=resumo_operacional
-                        )
-
-                        st.success("Arquivo Excel gerado com sucesso!")
-
-                        st.download_button(
-                            "Baixar Excel do acompanhamento diário",
-                            data=excel_data,
-                            file_name=nome_arquivo,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
 
         except Exception as e:
             st.error(f"Erro ao gerar acompanhamento diário: {e}")
