@@ -17,8 +17,8 @@ import streamlit as st
 st.set_page_config(
     page_title="Sistema de Automações",
     layout="wide"
-)
-
+    page_icon="🌍"
+) 
 st.title("Sistema Completo de Automações")
 st.caption("Filtros, relatórios, exportações e acompanhamento diário de produtividade.")
 
