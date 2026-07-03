@@ -3,6 +3,7 @@ import os
 import tempfile
 import unicodedata
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -34,6 +35,28 @@ def normalize_text(texto):
     return texto
 
 
+def agora_sao_paulo():
+    return datetime.now(ZoneInfo("America/Sao_Paulo"))
+
+
+def converter_data_brasil(serie):
+    return pd.to_datetime(
+        serie,
+        errors="coerce",
+        dayfirst=True
+    ).dt.date
+
+
+def formatar_data_brasil(valor):
+    if pd.isna(valor):
+        return ""
+
+    try:
+        return pd.to_datetime(valor, dayfirst=True).strftime("%d/%m/%Y")
+    except Exception:
+        return str(valor)
+
+
 def encontrar_coluna(df, palavras):
     for col in df.columns:
         col_norm = normalize_text(col)
@@ -44,8 +67,10 @@ def encontrar_coluna(df, palavras):
 
 def safe_sheet_name(nome):
     nome = str(nome)
+
     for c in ['\\', '/', '*', '[', ']', ':', '?']:
         nome = nome.replace(c, "")
+
     return nome[:30] if nome else "ABA"
 
 
@@ -94,14 +119,17 @@ def aplicar_bordas_e_larguras(ws, max_width=55):
         for cell in row:
             if isinstance(cell, MergedCell):
                 continue
+
             if cell.value is not None:
                 cell.border = borda
 
     for col_idx, col_cells in enumerate(ws.columns, start=1):
         max_len = 0
+
         for cell in col_cells:
             if isinstance(cell, MergedCell):
                 continue
+
             if cell.value is not None:
                 max_len = max(max_len, len(str(cell.value)))
 
@@ -113,15 +141,6 @@ def aplicar_bordas_e_larguras(ws, max_width=55):
 # =========================================================
 
 def classificar_periodo(hora):
-    """
-    Nova regra:
-    MANHÃ: 07h até 12h
-    TARDE: 13h até 18h
-    FORA DO PERÍODO: demais horários
-
-    Obs.: essa classificação NÃO remove registros.
-    Ela é usada apenas para análise visual.
-    """
     try:
         hora = int(hora)
     except Exception:
@@ -137,10 +156,6 @@ def classificar_periodo(hora):
 
 
 def classificar_faixa_horario_excel(hora):
-    """
-    Usado no Excel do acompanhamento.
-    Não exclui registros.
-    """
     try:
         hora = int(hora)
     except Exception:
@@ -385,7 +400,7 @@ def processar_filtro_adesoes(uploaded_file):
 
     return (
         excel_bytes_from_wb(wb),
-        f"Relatorio_Adesoes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        f"Relatorio_Adesoes_{agora_sao_paulo().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mensagem
     )
 
@@ -430,7 +445,7 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
     wb = Workbook()
     wb.remove(wb.active)
 
-    periodo = datetime.now().strftime("%d-%m-%Y")
+    periodo = agora_sao_paulo().strftime("%d-%m-%Y")
 
     ranking = (
         df_saida
@@ -517,7 +532,7 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
 
     return (
         excel_bytes_from_wb(wb),
-        f"resultado_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        f"resultado_{agora_sao_paulo().strftime('%Y%m%d_%H%M%S')}.xlsx"
     )
 
 
@@ -553,7 +568,7 @@ def processar_relatorio_agentes(uploaded_file):
     if faltando:
         raise ValueError("Colunas obrigatórias não encontradas: " + ", ".join(faltando))
 
-    df[col_data] = pd.to_datetime(df[col_data], errors="coerce").dt.date
+    df[col_data] = converter_data_brasil(df[col_data])
     df["TIPO_CLASS"] = df[col_tipo].apply(classificar_tipo_atendimento)
 
     wb = Workbook()
@@ -573,7 +588,7 @@ def processar_relatorio_agentes(uploaded_file):
 
         for _, r in tabela.iterrows():
             ws.append([
-                str(r[col_data]),
+                formatar_data_brasil(r[col_data]),
                 r[col_agente],
                 r["TIPO_CLASS"],
                 int(r["TOTAL"])
@@ -583,7 +598,7 @@ def processar_relatorio_agentes(uploaded_file):
 
     return (
         excel_bytes_from_wb(wb),
-        f"relatorio_agentes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        f"relatorio_agentes_{agora_sao_paulo().strftime('%Y%m%d_%H%M%S')}.xlsx"
     )
 
 
@@ -624,11 +639,8 @@ def preparar_base_ultima_visita(df, col_code, col_tipo):
 
 def calcular_metricas_envio(base_visitas, base_ultima_visita, col_data):
     visitas_totais = len(base_visitas)
-
     imoveis_visitados = base_visitas["IMOVEL"].nunique()
-
     dias = base_visitas[col_data].dropna().nunique()
-
     media = round(visitas_totais / dias) if dias else 0
 
     adesoes = int((base_ultima_visita["TIPO_CLASS"] == "ADESÕES").sum())
@@ -690,7 +702,7 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
     if faltando:
         raise ValueError("Colunas obrigatórias não encontradas: " + ", ".join(faltando))
 
-    df[col_data] = pd.to_datetime(df[col_data], errors="coerce").dt.date
+    df[col_data] = converter_data_brasil(df[col_data])
 
     df_base, df_ultima = preparar_base_ultima_visita(df, col_code, col_tipo)
 
@@ -784,6 +796,7 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
         aplicar_bordas_e_larguras(ws)
 
     ws_geral = wb.create_sheet("GERAL")
+
     criar_resumo(
         ws_geral,
         "RELATÓRIO DE ADESÕES, VISITAS E ÁREAS CORRELATAS",
@@ -847,6 +860,7 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
 
             for c, v in enumerate(valores, start=1):
                 cell = ws.cell(row=linha, column=c, value=excel_value(v))
+
                 if c in [5, 7, 9, 11]:
                     cell.number_format = "0.00%"
 
@@ -856,7 +870,7 @@ def processar_relatorio_envio_visitas_adesoes(uploaded_file):
 
     return (
         excel_bytes_from_wb(wb),
-        f"Relatorio_Adesoes_Visitas_Areas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        f"Relatorio_Adesoes_Visitas_Areas_{agora_sao_paulo().strftime('%Y%m%d_%H%M%S')}.xlsx"
     )
 
 
@@ -904,11 +918,15 @@ def preparar_acompanhamento(arquivos):
     if faltando:
         raise ValueError("Colunas obrigatórias não encontradas: " + ", ".join(faltando))
 
-    df["DATA_REGISTRO_TRATADA"] = pd.to_datetime(df[col_data], errors="coerce").dt.date
+    df["DATA_REGISTRO_TRATADA"] = converter_data_brasil(df[col_data])
 
     horario_str = df[col_horario].astype(str).str.strip()
 
-    hora_dt = pd.to_datetime(horario_str, errors="coerce").dt.hour
+    hora_dt = pd.to_datetime(
+        horario_str,
+        errors="coerce",
+        dayfirst=True
+    ).dt.hour
 
     hora_num = pd.to_numeric(
         horario_str.str.extract(r"(\d{1,2})", expand=False),
@@ -1079,13 +1097,10 @@ def montar_resumo_geral_acompanhamento(df_base, hora_extracao=None):
     datas_formatadas = []
 
     for data in sorted(df_base["DATA_REGISTRO_TRATADA"].dropna().unique()):
-        try:
-            datas_formatadas.append(pd.to_datetime(data).strftime("%d/%m/%Y"))
-        except Exception:
-            datas_formatadas.append(str(data))
+        datas_formatadas.append(formatar_data_brasil(data))
 
     if hora_extracao is None:
-        hora_extracao = datetime.now().strftime("%H:%M:%S")
+        hora_extracao = agora_sao_paulo().strftime("%H:%M:%S")
 
     return {
         "datas": ", ".join(datas_formatadas),
@@ -1161,7 +1176,7 @@ def gerar_excel_acompanhamento(df_base):
     from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
     from openpyxl.utils import get_column_letter
 
-    hora_extracao = datetime.now().strftime("%H:%M:%S")
+    hora_extracao = agora_sao_paulo().strftime("%H:%M:%S")
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -1245,6 +1260,7 @@ def gerar_excel_acompanhamento(df_base):
 
     for idx, label in enumerate(labels, start=3):
         ws.cell(row=idx, column=1, value=label).font = fonte_negrito
+
         cell_valor = ws.cell(row=idx, column=2, value=valores[idx - 3])
 
         if label == "Horário da extração":
@@ -1308,7 +1324,6 @@ def gerar_excel_acompanhamento(df_base):
             column=1,
             value="* MANHÃ - 07H ÀS 12H | TARDE - 13H ÀS 18H | FORA DO PERÍODO"
         )
-
         ws_asro.cell(row=6, column=1).font = fonte_negrito
 
         linha = 8
@@ -1364,7 +1379,7 @@ def gerar_excel_acompanhamento(df_base):
 
     return (
         output.getvalue(),
-        f"Acompanhamento_Diario_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        f"Acompanhamento_Diario_{agora_sao_paulo().strftime('%Y%m%d_%H%M%S')}.xlsx"
     )
 
 
@@ -1431,7 +1446,7 @@ with tab_filtro:
             st.download_button(
                 "Baixar mensagem em TXT",
                 data=mensagem.encode("utf-8"),
-                file_name=f"Mensagem_Adesoes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                file_name=f"Mensagem_Adesoes_{agora_sao_paulo().strftime('%Y%m%d_%H%M%S')}.txt",
                 mime="text/plain"
             )
 
