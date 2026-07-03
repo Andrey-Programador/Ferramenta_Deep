@@ -44,10 +44,8 @@ def encontrar_coluna(df, palavras):
 
 def safe_sheet_name(nome):
     nome = str(nome)
-
     for c in ['\\', '/', '*', '[', ']', ':', '?']:
         nome = nome.replace(c, "")
-
     return nome[:30] if nome else "ABA"
 
 
@@ -64,16 +62,6 @@ def read_excel_any(uploaded_file, dtype=None):
 def excel_bytes_from_wb(wb):
     output = io.BytesIO()
     wb.save(output)
-    output.seek(0)
-    return output.getvalue()
-
-
-def excel_bytes_from_df(df, sheet_name="RELATORIO"):
-    output = io.BytesIO()
-
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-
     output.seek(0)
     return output.getvalue()
 
@@ -194,34 +182,44 @@ def classificar_tipo_atendimento(valor):
 # 1) FILTRO DE ADESÕES
 # =========================================================
 
-def gerar_mensagem_resultado_adesoes(df_original, df_final, col_tipo):
-    if df_original is None or df_original.empty:
-        return "Resultado sobre adesões:\n\nNenhuma adesão encontrada no arquivo enviado."
-
+def filtrar_adesoes_realizadas(df, col_tipo):
+    """
+    Filtra todas as linhas onde Tipo de atendimento contém ADESÃO REALIZADA.
+    Essa mesma base é usada para gerar o Excel e a mensagem automática.
+    """
     if not col_tipo:
-        return "Resultado sobre adesões:\n\nColuna 'Tipo de atendimento' não encontrada."
+        return df.iloc[0:0].copy()
 
-    df_msg = df_original.copy()
-    tipo_norm = df_msg[col_tipo].astype(str).apply(normalize_text)
+    tipo_norm = df[col_tipo].astype(str).apply(normalize_text)
 
-    df_adesoes_msg = df_msg[
+    df_filtrado = df[
         tipo_norm.str.contains("ADESAO REALIZADA", na=False)
     ].copy()
 
-    if df_adesoes_msg.empty:
-        return "Resultado sobre adesões:\n\nNenhuma adesão realizada encontrada no arquivo enviado."
+    # Correção principal: remove índice original para não pular linhas no Excel
+    df_filtrado = df_filtrado.reset_index(drop=True)
 
-    total_adesoes = len(df_adesoes_msg)
+    return df_filtrado
 
-    col_data = encontrar_coluna(df_adesoes_msg, ["DATA", "REGISTRO"])
-    col_asro = encontrar_coluna(df_adesoes_msg, ["ASRO"])
-    col_novo = encontrar_coluna(df_adesoes_msg, ["NOVO"])
+
+def gerar_mensagem_resultado_adesoes(df_adesoes):
+    """
+    Gera mensagem automática com base no mesmo DataFrame que será exportado.
+    """
+    if df_adesoes is None or df_adesoes.empty:
+        return "Resultado sobre adesões:\n\nNenhuma adesão encontrada no arquivo enviado."
+
+    total_adesoes = len(df_adesoes)
+
+    col_data = encontrar_coluna(df_adesoes, ["DATA", "REGISTRO"])
+    col_asro = encontrar_coluna(df_adesoes, ["ASRO"])
+    col_novo = encontrar_coluna(df_adesoes, ["NOVO"])
 
     data_texto = "Na data analisada"
 
     if col_data:
         datas = pd.to_datetime(
-            df_adesoes_msg[col_data],
+            df_adesoes[col_data],
             errors="coerce",
             dayfirst=True
         )
@@ -241,7 +239,7 @@ def gerar_mensagem_resultado_adesoes(df_original, df_final, col_tipo):
 
     if col_novo:
         novos_clientes = (
-            df_adesoes_msg[col_novo]
+            df_adesoes[col_novo]
             .astype(str)
             .str.strip()
             .str.upper()
@@ -256,7 +254,7 @@ def gerar_mensagem_resultado_adesoes(df_original, df_final, col_tipo):
     )
 
     if col_asro:
-        for asro, dados_asro in sorted(df_adesoes_msg.groupby(col_asro), key=lambda x: str(x[0])):
+        for asro, dados_asro in sorted(df_adesoes.groupby(col_asro), key=lambda x: str(x[0])):
             total_asro = len(dados_asro)
 
             novos_asro = 0
@@ -282,6 +280,7 @@ def gerar_mensagem_resultado_adesoes(df_original, df_final, col_tipo):
 def processar_filtro_adesoes(uploaded_file):
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Border, Side, Font, Alignment
+    from openpyxl.worksheet.table import Table, TableStyleInfo
 
     df = read_excel_any(uploaded_file)
     df.columns = df.columns.astype(str).str.strip()
@@ -291,40 +290,37 @@ def processar_filtro_adesoes(uploaded_file):
     if not col_tipo:
         raise ValueError("Coluna 'Tipo de atendimento' não encontrada.")
 
-    tipo_norm = df[col_tipo].astype(str).apply(normalize_text)
-
-    df_filtrado = df[
-        tipo_norm.str.contains("ADESAO REALIZADA", na=False)
-    ].copy()
+    # Mesma base usada para Excel e mensagem
+    df_adesoes = filtrar_adesoes_realizadas(df, col_tipo)
 
     df_final = pd.DataFrame()
 
-    for coluna in df_filtrado.columns:
+    for coluna in df_adesoes.columns:
         nome = str(coluna).strip().lower()
 
         if "link backoffice" in nome:
-            df_final["Link Backoffice"] = df_filtrado[coluna]
+            df_final["Link Backoffice"] = df_adesoes[coluna]
 
         elif "code deep" in nome:
-            df_final["Code Deep"] = df_filtrado[coluna]
+            df_final["Code Deep"] = df_adesoes[coluna]
 
         elif "data do registro" in nome:
-            df_final["Data do registro"] = df_filtrado[coluna]
+            df_final["Data do registro"] = df_adesoes[coluna]
 
         elif nome == "asro":
-            df_final["ASRO"] = df_filtrado[coluna]
+            df_final["ASRO"] = df_adesoes[coluna]
 
         elif nome == "nome completo:":
-            df_final["Cliente"] = df_filtrado[coluna]
+            df_final["Cliente"] = df_adesoes[coluna]
 
         elif nome in ["é novo cliente?", "e novo cliente?"]:
-            df_final["É novo cliente?"] = df_filtrado[coluna]
+            df_final["É novo cliente?"] = df_adesoes[coluna]
 
         elif nome in ["situação backoffice", "situacao backoffice"]:
-            df_final["Backoffice"] = df_filtrado[coluna]
+            df_final["Backoffice"] = df_adesoes[coluna]
 
         elif nome == "tipo de atendimento":
-            df_final["Tipo de atendimento"] = df_filtrado[coluna]
+            df_final["Tipo de atendimento"] = df_adesoes[coluna]
 
     colunas_finais = [
         "Link Backoffice",
@@ -342,6 +338,9 @@ def processar_filtro_adesoes(uploaded_file):
             df_final[col] = ""
 
     df_final = df_final[colunas_finais]
+
+    # Correção principal: garante linhas contínuas na exportação
+    df_final = df_final.reset_index(drop=True)
 
     wb = Workbook()
     ws = wb.active
@@ -364,13 +363,34 @@ def processar_filtro_adesoes(uploaded_file):
         cell.alignment = Alignment(horizontal="center")
         cell.border = borda
 
-    for i, row in df_final.iterrows():
+    # Correção: usar enumerate em vez do índice original do pandas
+    for row_idx, row in enumerate(df_final.itertuples(index=False), start=2):
         for col_id, value in enumerate(row, start=1):
-            ws.cell(row=i + 2, column=col_id, value=excel_value(value)).border = borda
+            cell = ws.cell(row=row_idx, column=col_id, value=excel_value(value))
+            cell.border = borda
+
+    if len(df_final) > 0:
+        ultima_linha = len(df_final) + 1
+
+        tabela = Table(
+            displayName="TabelaAdesoes",
+            ref=f"A1:H{ultima_linha}"
+        )
+
+        estilo = TableStyleInfo(
+            name="TableStyleMedium4",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=False,
+            showColumnStripes=False
+        )
+
+        tabela.tableStyleInfo = estilo
+        ws.add_table(tabela)
 
     aplicar_bordas_e_larguras(ws)
 
-    mensagem = gerar_mensagem_resultado_adesoes(df, df_final, col_tipo)
+    mensagem = gerar_mensagem_resultado_adesoes(df_adesoes)
 
     return (
         excel_bytes_from_wb(wb),
@@ -1167,7 +1187,6 @@ def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
         ws.cell(row=linha, column=1, value=r["ASRO"])
         ws.cell(row=linha, column=2, value=int(r["Visitas"]))
         ws.cell(row=linha, column=3, value=int(r["Média por agente"]))
-
         linha += 1
 
     ranking_start = 12
@@ -1187,7 +1206,6 @@ def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
         ws.cell(row=linha_rank, column=6, value=r["AGENTE"])
         ws.cell(row=linha_rank, column=7, value=r["ASRO"])
         ws.cell(row=linha_rank, column=8, value=int(r["Visitas"]))
-
         linha_rank += 1
 
     estilizar_range(ws)
@@ -1236,7 +1254,6 @@ def gerar_excel_acompanhamento(df_periodos, resumo_operacional=None):
 
             tabela_agente = montar_resumo_agente_por_faixa(dados_agente)
             linha = escrever_df(ws_asro, tabela_agente, linha, 1, header_fill=cinza)
-
             linha += 1
 
         estilizar_range(ws_asro)
