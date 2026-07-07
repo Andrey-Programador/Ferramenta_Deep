@@ -408,16 +408,48 @@ def processar_filtro_adesoes(uploaded_file):
 # TERMO DE DOAÇÃO
 # =========================================================
 
-def processar_termo_doacao(uploaded_file, logo_file=None):
+def processar_termo_doacao(uploaded_file):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.drawing.image import Image
 
     df = read_excel_any(uploaded_file)
     df.columns = df.columns.astype(str).str.strip().str.upper()
 
+    # =====================================================
+    # FUNÇÕES INTERNAS
+    # =====================================================
+
     def col_por_palavras(palavras):
-        return next((c for c in df.columns if all(p in c for p in palavras)), None)
+        """
+        Encontra a primeira coluna que contenha todas as palavras informadas.
+        Exemplo:
+        ["NOME", "COMPLETO"] encontra "NOME COMPLETO:"
+        """
+        return next(
+            (c for c in df.columns if all(p in c for p in palavras)),
+            None
+        )
+
+    def pegar_coluna_unica(df_base, nome_coluna):
+        """
+        Corrige erro quando existem colunas duplicadas no Excel.
+
+        Se o pandas retornar várias colunas com o mesmo nome,
+        usa somente a primeira coluna.
+        """
+        if not nome_coluna:
+            return ""
+
+        dados = df_base.loc[:, nome_coluna]
+
+        if isinstance(dados, pd.DataFrame):
+            return dados.iloc[:, 0]
+
+        return dados
+
+    # =====================================================
+    # IDENTIFICAR COLUNAS
+    # =====================================================
 
     col_code = col_por_palavras(["CODE"])
     col_nome = col_por_palavras(["NOME", "COMPLETO"])
@@ -427,24 +459,73 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
     col_comp = col_por_palavras(["COMPLEMENTO"])
 
     if not col_code or not col_nome or not col_novo:
-        raise ValueError("Colunas obrigatórias não encontradas: CODE, NOME COMPLETO e NOVO.")
+        raise ValueError(
+            "Colunas obrigatórias não encontradas: CODE, NOME COMPLETO e NOVO."
+        )
 
-    df[col_novo] = df[col_novo].astype(str).str.upper().str.strip()
-    df = df[df[col_novo] == "SIM"]
+    # =====================================================
+    # FILTRAR SOMENTE NOVOS CLIENTES
+    # =====================================================
+
+    coluna_novo = (
+        pegar_coluna_unica(df, col_novo)
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+    df = df[coluna_novo == "SIM"].copy()
+
+    # =====================================================
+    # MONTAR DATAFRAME FINAL
+    # =====================================================
 
     df_saida = pd.DataFrame()
-    df_saida["CODE DEEP"] = df[col_code]
-    df_saida["NOME COMPLETO"] = df[col_nome]
-    df_saida["ASRO"] = df[col_asro] if col_asro else ""
-    df_saida["ENDEREÇO"] = df[col_end] if col_end else ""
-    df_saida["COMPLEMENTO"] = df[col_comp] if col_comp else ""
+
+    df_saida["CODE DEEP"] = pegar_coluna_unica(df, col_code)
+    df_saida["NOME COMPLETO"] = pegar_coluna_unica(df, col_nome)
+
+    if col_asro:
+        df_saida["ASRO"] = pegar_coluna_unica(df, col_asro)
+    else:
+        df_saida["ASRO"] = ""
+
+    if col_end:
+        df_saida["ENDEREÇO"] = pegar_coluna_unica(df, col_end)
+    else:
+        df_saida["ENDEREÇO"] = ""
+
+    # ✅ CORREÇÃO PRINCIPAL:
+    # evita erro quando existem múltiplas colunas chamadas COMPLEMENTO
+    if col_comp:
+        df_saida["COMPLEMENTO"] = pegar_coluna_unica(df, col_comp)
+    else:
+        df_saida["COMPLEMENTO"] = ""
+
+    # =====================================================
+    # TRATAMENTOS DE SEGURANÇA
+    # =====================================================
+
+    df_saida["CODE DEEP"] = df_saida["CODE DEEP"].fillna("").astype(str)
+    df_saida["NOME COMPLETO"] = df_saida["NOME COMPLETO"].fillna("").astype(str)
+    df_saida["ASRO"] = df_saida["ASRO"].fillna("SEM ASRO").astype(str).str.strip()
+    df_saida["ENDEREÇO"] = df_saida["ENDEREÇO"].fillna("").astype(str)
+    df_saida["COMPLEMENTO"] = df_saida["COMPLEMENTO"].fillna("").astype(str)
 
     df_saida = df_saida.sort_values(by="NOME COMPLETO")
+
+    # =====================================================
+    # CRIAR EXCEL
+    # =====================================================
 
     wb = Workbook()
     wb.remove(wb.active)
 
     periodo = agora_sao_paulo().strftime("%d-%m-%Y")
+
+    # =====================================================
+    # ABA RANKING
+    # =====================================================
 
     ranking = (
         df_saida
@@ -462,14 +543,9 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
 
     aplicar_bordas_e_larguras(ws_rank)
 
-    temp_logo_path = None
-
-    if logo_file is not None:
-        suffix = os.path.splitext(logo_file.name)[1] or ".png"
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(logo_file.read())
-            temp_logo_path = tmp.name
+    # =====================================================
+    # ESTILO
+    # =====================================================
 
     borda = Border(
         left=Side(style="thin"),
@@ -478,56 +554,74 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
         bottom=Side(style="thin")
     )
 
+    cor_cabecalho = PatternFill(
+        start_color="0DB39E",
+        fill_type="solid"
+    )
+
+    fonte_cabecalho = Font(
+        bold=True,
+        color="FFFFFF"
+    )
+
+    # =====================================================
+    # ABAS POR ASRO
+    # =====================================================
+
     for asro, dados in sorted(df_saida.groupby("ASRO"), key=lambda x: str(x[0])):
         ws = wb.create_sheet(title=safe_sheet_name(f"{asro} - {periodo}"))
 
-        logo_path = None
-
-        if temp_logo_path and os.path.exists(temp_logo_path):
-            logo_path = temp_logo_path
-        elif os.path.exists("logo.png"):
-            logo_path = "logo.png"
-
-        if logo_path:
-            try:
-                img = Image(logo_path)
-                img.width = 120
-                img.height = 40
-                ws.add_image(img, "A1")
-            except Exception:
-                pass
+        # =================================================
+        # TÍTULO
+        # =================================================
 
         ws.merge_cells("A1:E1")
         ws["A1"] = "TERMO DE DOAÇÃO DE PADRÃO"
         ws["A1"].font = Font(size=16, bold=True, color="FFFFFF")
-        ws["A1"].fill = PatternFill(start_color="0DB39E", fill_type="solid")
+        ws["A1"].fill = cor_cabecalho
         ws["A1"].alignment = Alignment(horizontal="center")
 
         ws.merge_cells("A2:E2")
         ws["A2"] = f"Período: {periodo}"
+        ws["A2"].alignment = Alignment(horizontal="center")
 
-        headers = ["CODE DEEP", "ASRO", "NOME COMPLETO", "ENDEREÇO", "COMPLEMENTO"]
+        # =================================================
+        # CABEÇALHO
+        # =================================================
+
+        headers = [
+            "CODE DEEP",
+            "ASRO",
+            "NOME COMPLETO",
+            "ENDEREÇO",
+            "COMPLEMENTO"
+        ]
 
         for col, header in enumerate(headers, start=1):
             cell = ws.cell(row=4, column=col, value=header)
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.fill = PatternFill(start_color="0DB39E", fill_type="solid")
+            cell.font = fonte_cabecalho
+            cell.fill = cor_cabecalho
             cell.alignment = Alignment(horizontal="center")
             cell.border = borda
 
+        # =================================================
+        # DADOS
+        # =================================================
+
         for i, row in enumerate(dados.itertuples(index=False), start=5):
-            valores = [row[0], row[2], row[1], row[3], row[4]]
+            valores = [
+                row[0],  # CODE DEEP
+                row[2],  # ASRO
+                row[1],  # NOME COMPLETO
+                row[3],  # ENDEREÇO
+                row[4],  # COMPLEMENTO
+            ]
 
             for col, val in enumerate(valores, start=1):
-                ws.cell(row=i, column=col, value=excel_value(val)).border = borda
+                cell = ws.cell(row=i, column=col, value=excel_value(val))
+                cell.border = borda
 
         aplicar_bordas_e_larguras(ws)
-
-    if temp_logo_path and os.path.exists(temp_logo_path):
-        try:
-            os.remove(temp_logo_path)
-        except Exception:
-            pass
 
     return (
         excel_bytes_from_wb(wb),
