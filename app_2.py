@@ -1,13 +1,19 @@
 import io
+import html
+import json
+import re
+import time
+import requests
 import os
 import tempfile
 import unicodedata
-from datetime import datetime
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # =========================================================
@@ -17,8 +23,40 @@ import streamlit as st
 st.set_page_config(
     page_title="Sistema de Automações",
     layout="wide"
-) 
-st.title("Sistema Completo de Automações")
+)
+
+# Centraliza a barra de abas e mantém o comportamento responsivo.
+st.markdown(
+    """
+    <style>
+    div[data-baseweb="tab-list"] {
+        justify-content: center;
+        column-gap: 1.35rem;
+        row-gap: 0.65rem;
+        flex-wrap: wrap;
+    }
+    div[data-baseweb="tab-list"] button {
+        flex-grow: 0;
+        padding-left: 0.30rem;
+        padding-right: 0.30rem;
+        white-space: nowrap;
+    }
+    div[data-baseweb="tab-list"] button p {
+        margin-left: 0.10rem;
+        margin-right: 0.10rem;
+    }
+    @media (max-width: 900px) {
+        div[data-baseweb="tab-list"] {
+            column-gap: 0.80rem;
+            row-gap: 0.55rem;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.title("🟢 Sistema Completo de Automações")
 st.caption("Filtros, relatórios, exportações e acompanhamento diário de produtividade.")
 
 
@@ -134,6 +172,346 @@ def aplicar_bordas_e_larguras(ws, max_width=55):
 
         ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 4, max_width)
 
+
+# =========================================================
+# BASE DE ENVIO LIGHT V5 - APENAS BACKOFFICE APROVADO
+# =========================================================
+TIPO = "ADESÃO REALIZADA (morador presente)"
+COMUNIDADES = ["COMUNIDADES CORTE OITO", "COMUNIDADES CHACRINHA", "COMUNIDADES SALGUEIRO"]
+COLUNAS_ORIGEM = [
+    "Code Deep", "Data do registro", "ASRO", *COMUNIDADES,
+    "CEP:", "Endereço", "Complemento:", "bairro", "É novo cliente?",
+    "NOME COMPLETO:", "CPF:", "RG:", "DATA DE NASCIMENTO:",
+    "TELEFONE PARA CONTATO:", "E-MAIL:", "POSSUI NIS?",
+    "Informar o número do NIS:", "NÚMERO DO MEDIDOR:",
+    "NÚMERO INSTALAÇÃO:", "UNIDADE CONSUMIDORA/ CÓDIGO DO CLIENTE:",
+    "FAIXA DE ENQUADRAMENTO ESCOLHIDA PELO CLIENTE:",
+    "DATA DE VENCIMENTO DA FATURA:", "FOTO DO RG", "FOTO DO CPF:"
+]
+ALIASES = {
+    "foto rg": "FOTO DO RG", "foto do rg": "FOTO DO RG",
+    "foto cpf": "FOTO DO CPF:", "foto do cpf": "FOTO DO CPF:",
+}
+
+def normalizar(v):
+    s = "" if v is None else str(v)
+    s = re.sub(r"_field", "", s, flags=re.I).replace("\xa0", " ").strip()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", s).casefold().strip(" :")
+
+def localizar_estrutura(conteudo: bytes):
+    xls = pd.ExcelFile(io.BytesIO(conteudo), engine="openpyxl")
+    for aba in xls.sheet_names:
+        previa = pd.read_excel(io.BytesIO(conteudo), sheet_name=aba, header=None, nrows=15, engine="openpyxl")
+        for linha in range(len(previa)):
+            vals = {normalizar(v) for v in previa.iloc[linha].dropna()}
+            if normalizar("Code Deep") in vals and normalizar("Data do registro") in vals:
+                return aba, linha
+    raise ValueError("Não foi possível localizar a linha de cabeçalho com 'Code Deep' e 'Data do registro'.")
+
+def ler_arquivo(conteudo: bytes):
+    aba, header = localizar_estrutura(conteudo)
+    df = pd.read_excel(io.BytesIO(conteudo), sheet_name=aba, header=header, dtype=object, engine="openpyxl")
+    # O arquivo real possui cabeçalhos repetidos em outros campos. Mapeamos somente nomes necessários.
+    canon = {normalizar(c): c for c in COLUNAS_ORIGEM + ["TIPO DE ATENDIMENTO", "Situação Backoffice"]}
+    nomes = []
+    usados = set()
+    for c in df.columns:
+        chave = normalizar(c)
+        nome = canon.get(chave, ALIASES.get(chave, str(c).strip()))
+        if nome in usados:
+            nome = str(c).strip()
+        usados.add(nome)
+        nomes.append(nome)
+    df.columns = nomes
+    faltantes = [c for c in COLUNAS_ORIGEM + ["TIPO DE ATENDIMENTO", "Situação Backoffice"] if c not in df.columns]
+    if faltantes:
+        raise ValueError("Colunas necessárias não encontradas: " + ", ".join(faltantes))
+    return df, aba, header
+
+def periodo_disponivel(df):
+    d = pd.to_datetime(df["Data do registro"], errors="coerce", dayfirst=True).dropna()
+    if d.empty:
+        raise ValueError("A coluna 'Data do registro' não contém datas válidas.")
+    return d.min().date(), d.max().date()
+
+def extrair_urls(valor):
+    """Extrai URLs individuais mesmo quando existem duas ou mais na mesma célula."""
+    if valor is None or pd.isna(valor):
+        return []
+    texto = str(valor).replace("\r", "\n")
+    return re.findall(r"https?://[^\s]+", texto, flags=re.IGNORECASE)
+
+def analisar_situacao_backoffice(df):
+    """Conta os registros aprovados e os que serão excluídos antes da geração."""
+    situacoes = df["Situação Backoffice"].fillna("").apply(normalizar)
+    aprovados = situacoes.eq("aprovado")
+    return {
+        "total": int(len(df)),
+        "aprovados": int(aprovados.sum()),
+        "nao_aprovados": int((~aprovados).sum()),
+        "mascara_aprovados": aprovados,
+    }
+
+def processar(df, inicio: date, fim: date):
+    base = df.copy()
+    datas = pd.to_datetime(base["Data do registro"], errors="coerce", dayfirst=True)
+    atendimento = base["TIPO DE ATENDIMENTO"].fillna("").astype(str).str.strip()
+
+    # Critério obrigatório e prioritário: somente Situação Backoffice = Aprovado.
+    # A normalização aceita diferenças de maiúsculas/minúsculas, acentos e espaços.
+    analise_backoffice = analisar_situacao_backoffice(base)
+    filtro_aprovado = analise_backoffice["mascara_aprovados"]
+
+    filtro_periodo = datas.between(
+        pd.Timestamp(inicio),
+        pd.Timestamp(fim) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1),
+        inclusive="both",
+    )
+    filtro = filtro_aprovado & atendimento.eq(TIPO) & filtro_periodo
+    envio = base.loc[filtro, COLUNAS_ORIGEM].copy()
+
+    # Lógica original: remove exatamente os dois últimos caracteres do Code Deep.
+    envio["Code Deep"] = envio["Code Deep"].fillna("").astype(str).apply(lambda x: x[:-2] if len(x) >= 2 else "")
+    envio["COMUNIDADE"] = envio[COMUNIDADES].replace(r"^\s*$", pd.NA, regex=True).bfill(axis=1).iloc[:, 0]
+    envio.drop(columns=COMUNIDADES, inplace=True)
+    envio["Data do registro"] = pd.to_datetime(envio["Data do registro"], errors="coerce", dayfirst=True).dt.strftime("%d/%m/%Y")
+    envio.replace("NÃO SE APLICA", "", inplace=True)
+    envio.fillna("", inplace=True)
+    envio.rename(columns={"FOTO DO RG": "FOTO DO RG", "FOTO DO CPF:": "FOTO DO CPF"}, inplace=True)
+
+    # A primeira URL representa a frente; a segunda URL representa o verso do RG.
+    urls_rg = envio["FOTO DO RG"].apply(extrair_urls)
+    envio["FOTO DO RG"] = urls_rg.apply(lambda links: links[0] if len(links) >= 1 else "")
+    envio["FOTO DO RG - VERSO"] = urls_rg.apply(lambda links: links[1] if len(links) >= 2 else "")
+
+    novos = envio["É novo cliente?"].astype(str).str.upper().str.strip()
+    cadastro = envio.loc[novos.eq("NÃO")].copy()
+    return cadastro, envio
+
+def gerar_excel(cadastro, envio):
+    # Mesmo layout e mesma ordem visual do arquivo manual enviado.
+    ordem = [
+        "Code Deep", "Data do registro", "ASRO", "COMUNIDADE", "CEP:",
+        "Endereço", "Complemento:", "bairro", "É novo cliente?",
+        "NOME COMPLETO:", "CPF:", "RG:", "FOTO DO RG", "FOTO DO RG - VERSO", "FOTO DO CPF",
+        "DATA DE NASCIMENTO:", "TELEFONE PARA CONTATO:", "E-MAIL:",
+        "POSSUI NIS?", "Informar o número do NIS:", "NÚMERO DO MEDIDOR:",
+        "NÚMERO INSTALAÇÃO:", "UNIDADE CONSUMIDORA/ CÓDIGO DO CLIENTE:",
+        "FAIXA DE ENQUADRAMENTO ESCOLHIDA PELO CLIENTE:",
+        "DATA DE VENCIMENTO DA FATURA:"
+    ]
+    nomes_saida = {
+        "Code Deep": "CODE DEEP",
+        "Data do registro": "DATA DO REGISTRO",
+        "ASRO": "ASRO",
+        "COMUNIDADE": "COMUNIDADE",
+        "CEP:": "CEP:",
+        "Endereço": "ENDEREÇO",
+        "Complemento:": "COMPLEMENTO:",
+        "bairro": "BAIRRO",
+        "É novo cliente?": "É NOVO CLIENTE?",
+        "NOME COMPLETO:": "NOME COMPLETO:",
+        "CPF:": "CPF:",
+        "RG:": "RG:",
+        "FOTO DO RG": "FOTO DO RG",
+        "FOTO DO RG - VERSO": "FOTO DO RG - VERSO",
+        "FOTO DO CPF": "FOTO DO CPF",
+        "DATA DE NASCIMENTO:": "DATA DE NASCIMENTO:",
+        "TELEFONE PARA CONTATO:": "TELEFONE PARA CONTATO:",
+        "E-MAIL:": "E-MAIL:",
+        "POSSUI NIS?": "POSSUI NIS?",
+        "Informar o número do NIS:": "INFORMAR O NÚMERO DO NIS:",
+        "NÚMERO DO MEDIDOR:": "NÚMERO DO MEDIDOR:",
+        "NÚMERO INSTALAÇÃO:": "NÚMERO INSTALAÇÃO:",
+        "UNIDADE CONSUMIDORA/ CÓDIGO DO CLIENTE:": "UNIDADE CONSUMIDORA/ CÓDIGO DO CLIENTE:",
+        "FAIXA DE ENQUADRAMENTO ESCOLHIDA PELO CLIENTE:": "FAIXA DE ENQUADRAMENTO ESCOLHIDA PELO CLIENTE:",
+        "DATA DE VENCIMENTO DA FATURA:": "DATA DE VENCIMENTO DA FATURA:",
+    }
+    larguras = [18.14, 18.43, 16.57, 30.71, 12.0, 66.71, 19.0, 13.71,
+                16.57, 37.29, 15.43, 17.29, 25.0, 25.0, 23.71, 22.14, 25.14,
+                40.71, 12.0, 29.14, 22.43, 22.0, 44.57, 51.0, 33.0]
+
+    saidas = {
+        "CADASTRO": cadastro.reindex(columns=ordem).rename(columns=nomes_saida),
+        "PROJETOS ESPECIAIS": envio.reindex(columns=ordem).rename(columns=nomes_saida),
+    }
+
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        for aba, dados in saidas.items():
+            dados.to_excel(writer, sheet_name=aba, index=False)
+            ws = writer.book[aba]
+
+            # Layout compacto do modelo manual: verde claro, fonte preta e altura comum.
+            ws.freeze_panes = None
+            ws.sheet_view.showGridLines = True
+            ws.auto_filter.ref = ws.dimensions
+            ws.row_dimensions[1].height = None
+
+            for cell in ws[1]:
+                cell.fill = PatternFill("solid", fgColor="63E6BE")
+                cell.font = Font(name="Calibri", size=11, bold=True, color="000000")
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
+
+            for i, largura in enumerate(larguras, start=1):
+                ws.column_dimensions[get_column_letter(i)].width = largura
+
+            cab = {str(c.value).strip(): c.column for c in ws[1] if c.value is not None}
+            for coluna, rotulo in [("FOTO DO RG", "Abrir frente do RG"), ("FOTO DO RG - VERSO", "Abrir verso do RG"), ("FOTO DO CPF", "Abrir foto do CPF")]:
+                idx = cab.get(coluna)
+                if not idx:
+                    continue
+                for r in range(2, ws.max_row + 1):
+                    cell = ws.cell(r, idx)
+                    valor = str(cell.value).strip() if cell.value else ""
+                    # Quando há mais de uma URL na mesma célula, usa a primeira como hyperlink.
+                    link = re.split(r"[\r\n]+", valor)[0].strip()
+                    if link.lower().startswith(("http://", "https://")):
+                        cell.hyperlink = link
+                        cell.value = rotulo
+                        cell.style = "Hyperlink"
+
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.font = Font(name="Aptos Narrow", size=11, color="000000", underline="single" if cell.hyperlink else None)
+                    cell.alignment = Alignment(vertical="center", wrap_text=False)
+
+    out.seek(0)
+    return out.getvalue()
+
+
+
+
+# =========================================================
+# ENCURTADOR DE URL
+# =========================================================
+
+ISGD_ENDPOINT = "https://is.gd/create.php"
+
+
+def extrair_links_texto(valor):
+    """Extrai URLs HTTP/HTTPS de textos e células, preservando a ordem."""
+    if valor is None:
+        return []
+    texto = str(valor).replace("\r", "\n")
+    encontrados = re.findall(r"https?://\S+", texto, flags=re.IGNORECASE)
+    limpos = [url.rstrip(".,;:)]}") for url in encontrados]
+    return list(dict.fromkeys(limpos))
+
+
+def validar_url_para_encurtar(url):
+    url = str(url).strip()
+    if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+        raise ValueError("O endereço precisa começar com http:// ou https://.")
+    if len(url) > 5000:
+        raise ValueError("O endereço excede o limite de 5.000 caracteres.")
+    return url
+
+
+def encurtar_url(url, timeout=20):
+    """Encurta uma URL real usando a API pública is.gd."""
+    url = validar_url_para_encurtar(url)
+    try:
+        resposta = requests.get(
+            ISGD_ENDPOINT,
+            params={"format": "json", "url": url},
+            headers={"User-Agent": "SistemaAutomacoes/1.0"},
+            timeout=timeout,
+        )
+        resposta.raise_for_status()
+        dados = resposta.json()
+    except requests.Timeout as erro:
+        raise RuntimeError("O serviço de encurtamento demorou para responder.") from erro
+    except requests.RequestException as erro:
+        raise RuntimeError(f"Não foi possível acessar o serviço de encurtamento: {erro}") from erro
+    except ValueError as erro:
+        raise RuntimeError("O serviço retornou uma resposta inválida.") from erro
+
+    if dados.get("shorturl"):
+        return dados["shorturl"]
+    mensagem = dados.get("errormessage") or "O serviço não conseguiu encurtar este endereço."
+    raise RuntimeError(mensagem)
+
+
+def localizar_links_excel(uploaded_file):
+    """Localiza links escritos e hiperlinks nativos em todas as abas do Excel."""
+    from openpyxl import load_workbook
+    uploaded_file.seek(0)
+    wb = load_workbook(io.BytesIO(uploaded_file.read()), data_only=False)
+    registros = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                links = []
+                if cell.hyperlink and cell.hyperlink.target:
+                    links.append(cell.hyperlink.target)
+                links.extend(extrair_links_texto(cell.value))
+                for ordem, link in enumerate(dict.fromkeys(links), start=1):
+                    registros.append({
+                        "ABA ORIGEM": ws.title,
+                        "LINHA ORIGEM": cell.row,
+                        "COLUNA ORIGEM": cell.column_letter,
+                        "ORDEM DO LINK": ordem,
+                        "URL ORIGINAL": link,
+                    })
+    return registros
+
+
+def processar_excel_encurtador(uploaded_file):
+    """Encurta links do Excel e gera uma planilha com origem, URL original e URL curta."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    registros = localizar_links_excel(uploaded_file)
+    if not registros:
+        raise ValueError("Nenhum link http ou https foi encontrado no arquivo.")
+
+    cache = {}
+    sucessos = 0
+    for item in registros:
+        original = item["URL ORIGINAL"]
+        if original not in cache:
+            try:
+                cache[original] = (encurtar_url(original), "OK")
+            except Exception as erro:
+                cache[original] = ("", str(erro))
+            time.sleep(0.15)
+        curta, status = cache[original]
+        item["URL ENCURTADA"] = curta
+        item["STATUS"] = status
+        if curta:
+            sucessos += 1
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "LINKS ENCURTADOS"
+    headers = [
+        "ABA ORIGEM", "LINHA ORIGEM", "COLUNA ORIGEM", "ORDEM DO LINK",
+        "URL ORIGINAL", "URL ENCURTADA", "STATUS"
+    ]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.fill = PatternFill("solid", fgColor="63E6BE")
+        cell.font = Font(bold=True, color="000000")
+        cell.alignment = Alignment(horizontal="center")
+
+    for item in registros:
+        ws.append([item[c] for c in headers])
+        linha = ws.max_row
+        if item["URL ORIGINAL"].lower().startswith(("http://", "https://")):
+            ws.cell(linha, 5).hyperlink = item["URL ORIGINAL"]
+            ws.cell(linha, 5).style = "Hyperlink"
+        if item["URL ENCURTADA"]:
+            ws.cell(linha, 6).hyperlink = item["URL ENCURTADA"]
+            ws.cell(linha, 6).style = "Hyperlink"
+
+    for i, width in enumerate([22, 16, 18, 16, 80, 32, 48], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+
+    return excel_bytes_from_wb(wb), len(registros), sucessos
 
 # =========================================================
 # CLASSIFICAÇÕES
@@ -517,6 +895,17 @@ def processar_termo_doacao(uploaded_file, logo_file=None):
     df_saida["ASRO"] = df_saida["ASRO"].fillna("SEM ASRO").astype(str).str.strip()
     df_saida["ENDEREÇO"] = df_saida["ENDEREÇO"].fillna("").astype(str)
     df_saida["COMPLEMENTO"] = df_saida["COMPLEMENTO"].fillna("").astype(str)
+
+    # Remove duplicados antes de gerar o ranking e as abas do Termo de Doação.
+    # Códigos preenchidos: mantém somente a primeira ocorrência de cada CODE DEEP.
+    # Códigos vazios: remove somente linhas integralmente repetidas.
+    df_saida = df_saida.drop_duplicates().copy()
+    codigo_limpo = df_saida["CODE DEEP"].astype(str).str.strip()
+    com_codigo = df_saida[codigo_limpo.ne("")].drop_duplicates(
+        subset=["CODE DEEP"], keep="first"
+    )
+    sem_codigo = df_saida[codigo_limpo.eq("")]
+    df_saida = pd.concat([com_codigo, sem_codigo], ignore_index=True)
 
     df_saida = df_saida.sort_values(by="NOME COMPLETO")
 
@@ -1466,8 +1855,10 @@ def gerar_excel_acompanhamento(df_base):
 # INTERFACE EM ABAS
 # =========================================================
 
-tab_filtro, tab_termo, tab_agentes, tab_envio, tab_acompanhamento = st.tabs([
+tab_filtro, tab_base_light, tab_hiperlinks, tab_termo, tab_agentes, tab_envio, tab_acompanhamento = st.tabs([
     "Filtro de Adesões",
+    "Base de Envio Light",
+    "Encurtador de Links",
     "Termo de Doação",
     "Relatório de Agentes",
     "Relatório Envio / Visitas / Adesões",
@@ -1536,6 +1927,109 @@ with tab_filtro:
 # =========================================================
 # ABA TERMO DE DOAÇÃO
 # =========================================================
+
+with tab_base_light:
+    st.header("Base de Envio Light")
+    st.markdown("""
+    **Como usar**
+    1. Anexe a exportação bruta em Excel.
+    2. A ferramenta analisa a coluna **Situação Backoffice** e aceita somente **Aprovado**.
+    3. Escolha o período e gere o arquivo.
+    4. O resultado terá as abas **CADASTRO** e **PROJETOS ESPECIAIS**, com RG frente, RG verso e CPF em links clicáveis.
+    """)
+    arquivo_light = st.file_uploader("Selecione a exportação bruta", type=["xlsx"], key="base_light_upload")
+    if arquivo_light:
+        try:
+            conteudo_light = arquivo_light.getvalue()
+            df_light, aba_light, header_light = ler_arquivo(conteudo_light)
+            data_min_light, data_max_light = periodo_disponivel(df_light)
+            analise_light = analisar_situacao_backoffice(df_light)
+            st.caption(f"Aba: {aba_light} | Cabeçalho: linha {header_light + 1} | Período: {data_min_light:%d/%m/%Y} a {data_max_light:%d/%m/%Y}")
+            l1, l2, l3 = st.columns(3)
+            l1.metric("Registros", analise_light["total"])
+            l2.metric("Aprovados", analise_light["aprovados"])
+            l3.metric("Não aprovados excluídos", analise_light["nao_aprovados"])
+            d1, d2 = st.columns(2)
+            inicio_light = d1.date_input("Data inicial", value=data_min_light, format="DD/MM/YYYY", key="light_inicio")
+            fim_light = d2.date_input("Data final", value=data_max_light, format="DD/MM/YYYY", key="light_fim")
+            if inicio_light > fim_light:
+                st.error("A data inicial não pode ser maior que a data final.")
+            elif st.button("Gerar Base de Envio Light", key="btn_base_light", type="primary"):
+                cadastro_light, projetos_light = processar(df_light, inicio_light, fim_light)
+                arquivo_saida_light = gerar_excel(cadastro_light, projetos_light)
+                st.success(f"Arquivo gerado: {len(projetos_light)} em PROJETOS ESPECIAIS e {len(cadastro_light)} em CADASTRO.")
+                st.download_button(
+                    "Baixar Base de Envio Light",
+                    data=arquivo_saida_light,
+                    file_name=f"base_envio_light_aprovados_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+        except Exception as e:
+            st.error(f"Erro: {e}")
+
+with tab_hiperlinks:
+    st.header("Encurtador de Links em Excel")
+
+    st.info(
+        """
+        **Como usar esta ferramenta**
+
+        1. Anexe um arquivo Excel no formato `.xlsx`.
+        2. O sistema analisará todas as abas e células do arquivo.
+        3. Links aglomerados na mesma célula serão identificados e separados.
+        4. Hiperlinks já existentes nas células também serão reconhecidos.
+        5. Cada URL será enviada ao serviço de encurtamento.
+        6. O sistema gerará um novo Excel com a URL original, a URL encurtada e o status.
+        """
+    )
+
+    st.warning(
+        "Os endereços são enviados ao serviço público is.gd para encurtamento. "
+        "Não envie links internos, confidenciais ou que contenham dados sensíveis sem autorização."
+    )
+
+    arquivo_links = st.file_uploader(
+        "Selecione o Excel com links",
+        type=["xlsx"],
+        key="excel_encurtador_final",
+    )
+
+    if arquivo_links:
+        try:
+            links_localizados = localizar_links_excel(arquivo_links)
+            st.metric("Links identificados", len(links_localizados))
+
+            if not links_localizados:
+                st.warning("Nenhum link http ou https foi encontrado no arquivo.")
+            elif st.button(
+                "Encurtar links e gerar Excel",
+                key="btn_excel_encurtador_final",
+                type="primary",
+                use_container_width=True,
+            ):
+                with st.spinner("Localizando, separando e encurtando os links..."):
+                    resultado, total, sucessos = processar_excel_encurtador(arquivo_links)
+
+                st.success(
+                    f"Processamento concluído: {sucessos} de {total} links foram encurtados."
+                )
+
+                if sucessos < total:
+                    st.warning(
+                        "Alguns links não foram encurtados. Consulte a coluna STATUS no arquivo gerado."
+                    )
+
+                st.download_button(
+                    "Baixar Excel com links encurtados",
+                    data=resultado,
+                    file_name=f"links_encurtados_{agora_sao_paulo():%Y%m%d_%H%M%S}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                )
+        except Exception as erro:
+            st.error(f"Erro: {erro}")
+
 
 with tab_termo:
     st.header("Termo de Doação")
